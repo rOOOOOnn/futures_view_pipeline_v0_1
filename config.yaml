@@ -1,0 +1,65 @@
+timezone: Asia/Shanghai
+
+browser:
+  headless: true
+  wait_ms: 2500
+  debug: true
+  max_pages: 8
+
+sources:
+  gfqh:
+    enabled: true
+    company: 广发期货
+    mode: official_pdf
+    start_url: https://rd.gfqh.cn/RDInformation/menu/235
+
+  citicsf:
+    enabled: true
+    company: 中信期货
+    mode: official_web
+    start_url: https://inst.citicsf.com/research-report/researchReportQuery
+
+  gtjaqh:
+    enabled: true
+    company: 国泰海通期货
+    mode: official_title_only
+    start_url: https://www.gtjaqh.com/pc/report?catType=&page=1
+
+  dzqh_public:
+    enabled: true
+    company: 东证期货
+    mode: llm_public_search
+    # 东证不爬受限官网：由联网 LLM 按专用 Prompt 检索公开报道/可靠转载。
+
+llm_web:
+  enabled: true
+  provider: yuanbao
+  url: "https://yuanbao.tencent.com/"
+  profile_dir: browser_profile/llm
+  headed: true
+  new_chat_each_company: true
+  response_timeout_seconds: 300
+  # 网页改版时通常只需要改这里，不改采集层。
+  input_selectors:
+    - '.ql-editor[contenteditable="true"]'
+    - 'textarea'
+    - '[contenteditable="true"]'
+  send_selectors:
+    - '[class*="send-btn"]'
+    - '[class*="send-button"]'
+    - 'button[aria-label*="Send"]'
+    - 'button[aria-label*="发送"]'
+    - 'button[type="submit"]'
+  assistant_message_selectors:
+    - '[class*="agent-chat__conv--ai"]'
+    - '[class*="agent-chat__message--ai"]'
+    - '[class*="message-content"]'
+    - '[data-message-author-role="assistant"]'
+    - '.assistant-message'
+    - '.markdown'
+  new_chat_selectors:
+    - '[title="新建对话"]'
+    - '[aria-label="新建对话"]'
+    - 'a[href*="new"]'
+    - 'button[aria-label*="New chat"]'
+    - 'button[aria-label*="新建"]'

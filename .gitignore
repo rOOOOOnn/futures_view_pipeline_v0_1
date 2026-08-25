@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+browser_profile/
+data/raw/
+data/normalized/
+data/llm_input/
+data/llm_output/
+data/final/
+data/pdfs/
+data/debug/
+output/
+tmp/

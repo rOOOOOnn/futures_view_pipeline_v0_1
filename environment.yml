@@ -1,0 +1,8 @@
+name: futures-view-system
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -e .
