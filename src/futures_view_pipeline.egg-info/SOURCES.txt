@@ -15,7 +15,6 @@ src/futures_view/llm/browser_llm.py
 src/futures_view/scrapers/__init__.py
 src/futures_view/scrapers/base.py
 src/futures_view/scrapers/citicsf.py
-src/futures_view/scrapers/dzqh_public.py
 src/futures_view/scrapers/gfqh.py
 src/futures_view/scrapers/gtjaqh.py
 src/futures_view_pipeline.egg-info/PKG-INFO
@@ -23,3 +22,4 @@ src/futures_view_pipeline.egg-info/SOURCES.txt
 src/futures_view_pipeline.egg-info/dependency_links.txt
 src/futures_view_pipeline.egg-info/requires.txt
 src/futures_view_pipeline.egg-info/top_level.txt
+tests/test_core.py

@@ -39,17 +39,57 @@ llm_web:
   headed: true
   new_chat_each_company: true
   response_timeout_seconds: 300
+  response_stable_seconds: 15
+  minimum_response_wait_seconds: 15
+  cooldown_between_companies_seconds: 3
+  max_submissions_per_run: 4
+  deep_thinking: true
+  prompt_delivery: auto
+  prompt_upload_threshold_chars: 6000
+  attachment_ready_timeout_seconds: 60
   # 网页改版时通常只需要改这里，不改采集层。
   input_selectors:
     - '.ql-editor[contenteditable="true"]'
     - 'textarea'
     - '[contenteditable="true"]'
+  add_attachment_selectors:
+    - 'button[aria-label="添加"]'
+    - '[role="button"][aria-label="添加"]'
+    - 'button:has-text("添加")'
+  upload_file_option_selectors:
+    - 'button:has-text("本地文件")'
+    - '[role="menuitem"]:has-text("本地文件")'
+    - '[role="button"]:has-text("本地文件")'
+    - 'text="本地文件"'
+    - 'button:has-text("上传文件")'
+    - '[role="menuitem"]:has-text("上传文件")'
+    - '[role="button"]:has-text("上传文件")'
+    - 'text="上传文件"'
   send_selectors:
     - '[class*="send-btn"]'
     - '[class*="send-button"]'
     - 'button[aria-label*="Send"]'
     - 'button[aria-label*="发送"]'
     - 'button[type="submit"]'
+  deep_thinking_selectors:
+    - 'button:has-text("深度思考")'
+    - '[role="button"]:has-text("深度思考")'
+    - '[class*="deep-think"]'
+    - '[class*="deepthink"]'
+  model_switch_selectors:
+    - 'button[aria-label="切换模型"]'
+    - '[role="button"][aria-label="切换模型"]'
+    - 'button:has-text("快速回答")'
+  deep_thinking_option_selectors:
+    - 'button:has-text("深度思考")'
+    - '[role="menuitem"]:has-text("深度思考")'
+    - '[role="option"]:has-text("深度思考")'
+    - 'text="深度思考"'
+  generating_selectors:
+    - 'button:has-text("停止生成")'
+    - 'button[aria-label*="停止"]'
+    - '[class*="stop-btn"]'
+    - '[class*="generating"]'
   assistant_message_selectors:
     - '[class*="agent-chat__conv--ai"]'
     - '[class*="agent-chat__message--ai"]'
@@ -58,6 +98,7 @@ llm_web:
     - '.assistant-message'
     - '.markdown'
   new_chat_selectors:
+    - 'text="新对话"'
     - '[title="新建对话"]'
     - '[aria-label="新建对话"]'
     - 'a[href*="new"]'
