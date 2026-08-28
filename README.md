@@ -6,9 +6,9 @@
 广发期货官网 -> 综合 -> 广发期货日评 -> PNG超级汇总 -> 表格结构化OCR ┐
 中信期货官网 -> 公开 reportsQuery API -> rptSummary -------┤
 国泰君安期货官网 -> 当日公开标题（全文在小程序）------------┤
-东证期货 -> 腾讯元宝联网检索公众号/公开转载 ----------------┤
+东证期货 -> TokenHub联网检索公众号/公开转载 ----------------┤
                                                           ↓
-                    四份同构 Prompt -> TokenHub API（默认）/ 网页版元宝（备用）
+                           四份同构 Prompt -> TokenHub API
                                                           ↓
                          四份同构 JSON -> Python 校验/评分
                                                           ↓
@@ -60,23 +60,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 脚本会创建/更新 `futures-view-system` 环境、安装项目依赖和 Playwright Chromium。
 
-## 三、首次登录腾讯元宝
-
-```powershell
-conda run --no-capture-output -n futures-view-system python -m futures_view.run --login-only
-```
-
-在打开的网页中手动扫码登录。进入可输入的聊天页后回到终端按 Enter。登录资料尝试保存在：
-
-```text
-browser_profile/llm/
-```
-
-请勿把该目录上传、共享或提交到版本库。腾讯可能主动使网页登录态失效。正常运行检测到登录弹窗时，会先自动关闭弹窗并检查输入框；匿名对话可用就直接继续。只有匿名输入不可用时，程序才会在同一个浏览器窗口暂停并提示扫码，扫码后按 Enter 即继续本次任务。可通过 `config.yaml -> llm_web.allow_anonymous` 控制是否允许匿名运行。
-
-匿名模式没有深度思考和文件上传控件，程序会自动使用默认回答并直接输入 Prompt；登录模式才会启用深度思考及长 Prompt 附件上传。当前广发日评经过 PNG OCR 后的 Prompt 已控制在可直接输入的长度内。
-
-## 四、每日总入口
+## 三、每日总入口
 
 默认使用 Asia/Shanghai 当日，并默认通过腾讯 TokenHub API 完成分类和东证联网检索：
 
@@ -90,19 +74,22 @@ browser_profile/llm/
 .\run_all.ps1 -Date 2026-08-26 -LlmBackend api
 ```
 
-浏览器备用方式：
+API 默认使用 `hy3`。普通分类的接入地域应按 TokenHub 服务和 API Key 的实际开通地域选择，而不是一律使用广州，也不能仅凭当前电脑位置自动判断：
 
-```powershell
-.\run_all.ps1 -Date 2026-08-26 -LlmBackend browser
-```
+| 服务开通地域 | `config.yaml -> llm_api.base_url` | 资源范围 |
+|---|---|---|
+| 广州 | `https://tokenhub.tencentmaas.com/v1` | 中国大陆 |
+| 新加坡 | `https://tokenhub-intl.tencentmaas.com/v1` | 全球 |
 
-API 默认使用 `hy3`：广发、中信、国泰使用新加坡入口做文本分类；东证使用广州入口开启 TokenHub 标准联网搜索。腾讯的 API Key 按地域隔离，新加坡 Key 不能调用广州入口。首次使用东证 API 前，需要在广州站创建 API Key，并在“工具管理”开通联网搜索资源包，然后运行：
+一般在中国大陆使用可优先选择广州，面向全球可选择新加坡；最终必须以 API Key 所属站点为准，广州和新加坡 Key 不互通。项目当前示例配置使用新加坡入口做普通分类；如果你的普通 Key 创建在广州，应把 `base_url` 改为广州地址。腾讯官方说明见 [TokenHub API 使用说明](https://cloud.tencent.com/document/product/1823/130078)。
+
+东证需要联网搜索，而 TokenHub 联网搜索目前只支持广州，因此 `search_base_url` 使用广州地址。首次使用前，需要在广州站创建 Key，并在“工具管理”开通联网搜索资源包，然后运行：
 
 ```powershell
 .\save_api_key.ps1 -Search
 ```
 
-该 Key 保存到 Git 已忽略的 `secrets/tokenhub_search_api_key.txt`；总入口发现文件不存在时也会自动提示。模型、两个地址和搜索版本位于 `config.yaml -> llm_api`。普通 Key 可由环境变量 `TENCENT_TOKENHUB_API_KEY` 或本地忽略文件提供，搜索 Key 对应 `TENCENT_TOKENHUB_SEARCH_API_KEY`。禁止把 Key 写入 `config.yaml` 或提交到 Git。
+该 Key 保存到 Git 已忽略的 `secrets/tokenhub_search_api_key.txt`；总入口发现文件不存在时也会自动提示。若普通分类也使用广州，同一个具备模型和联网搜索权限的广州 Key 可以分别保存到两个本地 Key 文件。模型、两个地址和搜索版本位于 `config.yaml -> llm_api`。普通 Key 可由环境变量 `TENCENT_TOKENHUB_API_KEY` 或本地忽略文件提供，搜索 Key 对应 `TENCENT_TOKENHUB_SEARCH_API_KEY`。禁止把 Key 写入 `config.yaml` 或提交到 Git。联网搜索的广州地域限制见 [官方联网搜索文档](https://cloud.tencent.com/document/product/1823/132358)。
 
 东证采用“两阶段”处理：先联网发现公众号/转载来源，再关闭联网按严格 JSON Schema 分类。程序会保存并检查 API 返回的 `search_results`；联网未实际发生、两轮检索为空或 URL 不是具体文章地址时会明确标记失败，不会把模型口头描述的“已搜索”当成成功。来源顺序为微信公众号“东证期货微咨询”（兼容名称“东证期货微资讯”）→ 明确署名的官方页面 → 可靠完整转载。
 
@@ -120,20 +107,16 @@ API 默认使用 `hy3`：广发、中信、国泰使用新加坡入口做文本�
 
 1. 三家公司官网采集；
 2. 标准化并生成四份公司 Prompt；
-3. 默认用 TokenHub API 逐公司处理（浏览器元宝仅作备用）；
+3. 用 TokenHub API 逐公司处理；
 4. 校验四份 JSON，生成评分矩阵和 Excel。
 
-模型阶段按 `manifest.json` 依次处理，正常情况下四家公司各执行一项主任务。广发只使用官网“交易品种=综合”下标题严格匹配 `广发期货日评YYYYMMDD` 的详情页，只下载其中 PNG 超级汇总图。Python 会检测表格横线，把“品种、合约、点评、操作建议”按行还原，并通过品种及合约代码固定板块，不再把整图 OCR 文字交叉拼接；PDF、周报汇总和“广发期货期现日报汇总”均不进入主流程。浏览器备用模式会切换到“深度思考”，并在回答停止生成且内容稳定后才进入下一项；单次运行有安全提交上限，防止异常循环发送。
+模型阶段按 `manifest.json` 依次处理，正常情况下四家公司各执行一项主任务。广发只使用官网“交易品种=综合”下标题严格匹配 `广发期货日评YYYYMMDD` 的详情页，只下载其中 PNG 超级汇总图。Python 会检测表格横线，把“品种、合约、点评、操作建议”按行还原，并通过品种及合约代码固定板块，不再把整图 OCR 文字交叉拼接；PDF、周报汇总和“广发期货期现日报汇总”均不进入主流程。
 
-广发日评通常只在周二至周五发布。目标日期没有日评时，官网状态为 `no_reports`，广发当天不调用元宝、不伪造中性观点；最终 Excel 按既有规则沿用最近一次可用观点。
+广发日评通常只在周二至周五发布。目标日期没有日评时，官网状态为 `no_reports`，广发当天不调用模型 API、不伪造中性观点；最终 Excel 按既有规则沿用最近一次可用观点。
 
-Prompt 采用自动投递：超过 `config.yaml -> prompt_upload_threshold_chars` 的长 Prompt 会作为 `.txt` 附件上传，输入框只发送简短的附件执行指令；短 Prompt 仍直接输入。这样可以避开元宝输入框的文字上限。上传未确认成功时程序会停止该公司并记录错误，不会退回到粘贴超长文本。
+终端会显示官网采集、PNG 下载、OCR、API 分类、联网搜索、最终汇总和质量门禁进度。每家公司完成时还会显示输入、输出、缓存和联网搜索调用次数；任何阶段失败都会返回非零退出码并给出具体原因。
 
-附件投递会在三个位置校验：上传稳定后、填写短指令后、发送到消息后。若元宝回复“未收到附件/请重新上传”或“超出字数限制/仅读取部分内容”，对应分块会标记为 `llm_error`，不会把残缺回复误判成正常结果。每次发送都带唯一 `任务ID`，发送后必须在用户消息区重新找到该编号；任务ID、页面地址会写入分块结果和运行日志，便于回看元宝聊天记录。程序还会阻止在“临时对话”模式下运行，因为临时对话不会进入历史记录。同一个 `browser_profile/llm` 不能同时打开两个元宝窗口；重跑前应关闭上一次由项目打开的窗口。
-
-终端在官网阶段显示公司进度，广发还会显示日评、PNG 下载和 OCR 进度；等待元宝时每 5 秒刷新一次进度条。任何任务错误都会在终端、`run.log`、错误 JSON 和截图中留下具体原因。
-
-## 五、逐家公司调试
+## 四、逐家公司调试
 
 公司键：
 
@@ -141,7 +124,7 @@ Prompt 采用自动投递：超过 `config.yaml -> prompt_upload_threshold_chars
 gfqh    广发期货
 citicsf 中信期货
 gtjaqh  国泰海通期货（官网主体仍显示国泰君安期货）
-dzqh    东证期货（只运行元宝联网检索，不爬受限官网）
+dzqh    东证期货（只运行TokenHub联网检索，不爬受限官网）
 ```
 
 例：只调广发爬虫：
@@ -156,7 +139,7 @@ dzqh    东证期货（只运行元宝联网检索，不爬受限官网）
 .\run_company.ps1 -Company gfqh -Stage prepare -Date 2026-08-25
 ```
 
-只让元宝重新处理东证：
+只让 API 重新处理东证：
 
 ```powershell
 .\run_company.ps1 -Company dzqh -Stage llm -Date 2026-08-25
@@ -174,7 +157,7 @@ dzqh    东证期货（只运行元宝联网检索，不爬受限官网）
 conda run --no-capture-output -n futures-view-system python -m futures_view.run --stage finalize --date 2026-08-25
 ```
 
-## 六、中间文件
+## 五、中间文件
 
 日期参数使用 `YYYY-MM-DD`，日期文件夹使用 `YYYYMMDD`。例如 `2026-08-26` 对应目录 `20260826`。
 
@@ -190,11 +173,9 @@ conda run --no-capture-output -n futures-view-system python -m futures_view.run 
 | `data/normalized/YYYYMMDD/documents.json` | 统一文档协议 | 只保留状态正常、可交给LLM的文档 |
 | `data/llm_input/YYYYMMDD/prompts/` | 最终Prompt | 广发通常为一份较短的 OCR 文本 Prompt |
 | `data/llm_input/YYYYMMDD/prompts/manifest.json` | Prompt清单 | 公司、来源数量和Prompt路径 |
-| `data/llm_output/YYYYMMDD/*.json` | 元宝原始分类结果 | 必须确认 `processing_status=ok` |
-| `data/llm_output/YYYYMMDD/parts/*.json` | 每个分块的独立结果/错误 | 聊天地址、分块状态、原始回复和错误原因 |
-| `data/llm_output/YYYYMMDD/run.log` | 元宝运行日志 | 发送时间、等待进度、聊天地址和错误 |
-| `data/llm_output/YYYYMMDD/run_summary.json` | 元宝运行摘要 | 快速查看失败公司和错误原因 |
-| `data/llm_output/YYYYMMDD/error_*_partNN.png` | 元宝失败截图 | 仅失败时生成 |
+| `data/llm_output/YYYYMMDD/*.json` | API原始分类结果及调用审计 | `processing_status`、`api.calls`、原始回复和拒绝原因 |
+| `data/llm_output/YYYYMMDD/api_run_summary.json` | API运行摘要 | 快速查看公司状态、记录数和Token用量 |
+| `data/llm_output/YYYYMMDD/error_*_api.json` | API错误详情 | 仅对应公司调用失败时生成 |
 | `output/YYYYMMDD/*.json` | Python校验、去重、评分后的JSON | 最终 `records` 和 `score` |
 | `output/YYYYMMDD/期货公司观点汇总_YYYYMMDD.xlsx` | 最终Excel | 汇总矩阵、当日明细、数据质量 |
 | `output/YYYYMMDD/quality_report_YYYYMMDD.json` | 自动质量门禁报告 | 是否通过、重复/非法条数、Excel一致性和明确观点遗漏 |
@@ -203,11 +184,11 @@ conda run --no-capture-output -n futures-view-system python -m futures_view.run 
 
 | 文件 | 作用 |
 |---|---|
-| `config.yaml` | 官网地址、浏览器、元宝控件、深度思考和上传阈值 |
+| `config.yaml` | 官网地址、TokenHub地域/模型/搜索参数及兼容配置 |
 | `first_setup.ps1` | 创建/更新Conda环境并安装浏览器 |
 | `run_all.ps1` | 默认当日或指定日期的完整流程入口 |
 | `run_company.ps1` | 单公司、单阶段调试入口 |
-| `save_api_key.ps1` | 安全录入普通分类 Key 或广州联网搜索 Key |
+| `save_api_key.ps1` | 安全录入普通分类地域 Key 或广州联网搜索 Key |
 | `prompts/classifier_prompt.txt` | 广发、中信、国泰分类规则 |
 | `prompts/dzqh_search_prompt.txt` | 东证公开信息检索规则 |
 | `src/futures_view/pipeline.py` | 三家官网采集调度 |
@@ -216,7 +197,7 @@ conda run --no-capture-output -n futures-view-system python -m futures_view.run 
 | `src/futures_view/ocr.py` | 广发日评PNG的表格定位、逐单元格OCR与质量信息 |
 | `src/futures_view/commodities.py` | 品种规范名、合约纠错及固定板块映射 |
 | `src/futures_view/reprocess_gfqh.py` | 不重新下载，使用已有PNG重做广发表格OCR |
-| `src/futures_view/llm/browser_llm.py` | 元宝登录、上传、发送和JSON提取 |
+| `src/futures_view/llm/browser_llm.py` | 兼容保留的网页后端与通用JSON提取器；日常运行不需要登录 |
 | `src/futures_view/llm/api_llm.py` | TokenHub API、严格JSON Schema、用量记录和东证联网搜索 |
 | `src/futures_view/title_rules.py` | 震荡偏多/偏空、操作建议和标题方向的确定性规则 |
 | `src/futures_view/source_validation.py` | URL修复、证据强度和东证真实网页署名核验 |
@@ -260,7 +241,7 @@ conda run --no-capture-output -n futures-view-system python -m futures_view.insp
 
 人工抽查爬虫时，打开三份 `data/raw/YYYYMMDD/*.json`，建议每家公司随机核对2—3条官网链接、日期、标题和正文。
 
-若网页 LLM 自动化暂时不稳定，可以手动把 `data/llm_input/YYYYMMDD/prompts/*.txt` 逐份发给模型，把回复复制到一个 `.txt` 文件，然后使用导入命令。导入器会校验日期、公司、字段、观点、板块和网址，并可修复元宝长 JSON 中明确可识别的缺失字段引号及重复 `https`：
+如需手工复核，可以把 `data/llm_input/YYYYMMDD/prompts/*.txt` 发给任意兼容模型，再把回复复制到一个 `.txt` 文件并使用导入命令。导入器会校验日期、公司、字段、观点、板块和网址，并修复少量明确可识别的 JSON 格式问题：
 
 ```powershell
 conda run --no-capture-output -n futures-view-system python -m futures_view.import_response `
@@ -298,19 +279,19 @@ conda run --no-capture-output -n futures-view-system python -m futures_view.run 
 conda run --no-capture-output -n futures-view-system python -m futures_view.run --stage prepare --date 2026-08-26
 ```
 
-只重新运行元宝：
+只重新运行 TokenHub API：
 
 ```powershell
 conda run --no-capture-output -n futures-view-system python -m futures_view.run --stage llm --date 2026-08-26
 ```
 
-只根据现有元宝JSON重建最终JSON和Excel：
+只根据现有模型JSON重建最终JSON和Excel：
 
 ```powershell
 conda run --no-capture-output -n futures-view-system python -m futures_view.run --stage finalize --date 2026-08-26
 ```
 
-## 七、评分和历史沿用口径
+## 六、评分和历史沿用口径
 
 - 同公司 × 同板块：该公司在该板块的不同商品得分等权平均。
 - 板块平均：四家公司等权；若某公司当日无观点，先查找该公司该板块最近一次历史得分。
@@ -325,20 +306,19 @@ Excel 包含：
 - `当日观点明细`：仅目标日新观点及证据；
 - `运行与数据质量`：采集/LLM 状态、拒绝记录数和覆盖情况。
 
-## 八、已知需要实际联调的部分
+## 七、已知需要实际联调的部分
 
-- 腾讯元宝网页可能改版；届时优先调整 `config.yaml -> llm_web` 的输入、发送、消息和新建对话选择器。
-- 元宝浏览器仅作为备用；自动化浏览器可能触发登录或风控。匿名模式可用时程序会关闭登录弹窗继续，否则验证码/CAPTCHA 必须人工处理。日常稳定运行优先使用 TokenHub API。
+- TokenHub 的可用模型、价格、免费额度和联网搜索地域可能调整，应以腾讯控制台及官方文档为准。
 - 广发 PNG 若无法定位“全品种日评”表头或横线数量异常，会直接报错，避免把错位数据交给模型。可先查看 `gfqh_ocr_audit.json`；修复识别规则后可执行 `conda run --no-capture-output -n futures-view-system python -m futures_view.reprocess_gfqh --date YYYY-MM-DD`，使用已下载PNG重做OCR而无需重新爬取。
 - 国泰只按官网标题分类，标题不够明确就不输出，置信度固定为低。
 - 官网结构变化或网络失败不会被伪装成“当天无报告”；状态会进入 JSON 和 Excel 数据质量页。
 
-## 九、版本库与本地数据
+## 八、版本库与本地数据
 
 GitHub 只保存源代码、Prompt、配置模板、脚本、测试和文档。以下内容只保留在本机并由 `.gitignore` 排除：
 
 - `secrets/`：API Key，严禁提交；
-- `browser_profile/`：网页登录态；
+- `browser_profile/`：仅兼容网页后端使用的本地资料，日常API运行不会读取；
 - `data/`：下载图片、原始数据、Prompt及模型响应；
 - `output/`：最终JSON和Excel；
 - `tmp/`、缓存、日志和 `*.egg-info/`：可随时重新生成的临时文件。

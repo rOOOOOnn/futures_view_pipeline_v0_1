@@ -75,7 +75,7 @@ def main() -> None:
             sizes.append(len(prompt.read_text(encoding="utf-8")) if prompt.exists() else 0)
         print(f"- {company}: Prompt任务={len(entries)}, 合计={sum(sizes)} 字, 最大单份={max(sizes, default=0)} 字")
 
-    print("\n[3/4] 元宝处理")
+    print("\n[3/4] 模型处理")
     all_llm_ok = True
     llm_data = {}
     for key, company in COMPANY_KEYS.items():

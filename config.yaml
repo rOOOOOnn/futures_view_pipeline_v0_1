@@ -114,8 +114,12 @@ llm_web:
 
 llm_api:
   provider: tokenhub
+  # 普通分类按API Key实际开通地域选择：
+  # 广州(中国大陆): https://tokenhub.tencentmaas.com/v1
+  # 新加坡(全球):   https://tokenhub-intl.tencentmaas.com/v1
+  # 两站Key不互通；此处保留当前已验证的新加坡配置。
   base_url: "https://tokenhub-intl.tencentmaas.com/v1"
-  # TokenHub 联网搜索使用国内广州入口；普通分类仍可沿用上面的现有入口。
+  # 联网搜索当前仅支持广州，因此东证发现阶段固定使用广州入口。
   search_base_url: "https://tokenhub.tencentmaas.com/v1"
   search_api_key_env: "TENCENT_TOKENHUB_SEARCH_API_KEY"
   search_api_key_file: "secrets/tokenhub_search_api_key.txt"
