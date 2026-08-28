@@ -1,11 +1,17 @@
 from __future__ import annotations
 import json
+import re
 from .base import BaseScraper
 from ..models import RawResearchItem
 from ..utils import clean_text
 
 class CITICSFScraper(BaseScraper):
     key='citicsf'; company='中信期货'; start_url='https://inst.citicsf.com/research-report/researchReportQuery'
+
+    @staticmethod
+    def title_matches_target(title: str, target_compact: str) -> bool:
+        title_dates=set(re.findall(r'20\d{6}', title))
+        return not title_dates or target_compact in title_dates
 
     async def _query_page(self, page_num: int, page_size: int = 100):
         compact=self.target_date.replace('-','')
@@ -34,12 +40,19 @@ class CITICSFScraper(BaseScraper):
         for row in rows:
             rpt_date=str(row.get('rptDate') or '')[:8]
             if rpt_date != target_compact: continue
+            title=clean_text(row.get('rptAllTitle') or '')
+            # The API occasionally assigns today's rptDate to a report whose
+            # title explicitly says it is tomorrow's Daily Note.  The title's
+            # YYYYMMDD is authoritative when present; never leak future views
+            # into the requested partition.
+            if not self.title_matches_target(title, target_compact):
+                continue
             authors='、'.join(x.get('researchName','') for x in (row.get('authorshipList') or []) if x.get('researchName')) or None
             varieties='、'.join(x.get('subVarietyName') or x.get('varietyName') or '' for x in (row.get('varietyAndSubVarietyList') or [])) or None
             rid=str(row.get('id') or '')
             url=f'{self.start_url}Detail?researchId={rid}&isTrue=true&fromMenu=ResearchReportQuery'
             items.append(RawResearchItem(
-                company=self.company,source_date=self.target_date,source_title=clean_text(row.get('rptAllTitle') or ''),source_url=url,
+                company=self.company,source_date=self.target_date,source_title=title,source_url=url,
                 source_type='官方网站',source_name='中信期货机构服务平台',content_kind='full_text',
                 content=clean_text(row.get('rptSummary') or ''),author=authors,category=varieties,source_id=rid,
                 attachments=[str(x.get('attachmentId')) for x in (row.get('attachmentList') or []) if x.get('attachmentId')],

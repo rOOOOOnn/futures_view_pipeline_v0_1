@@ -27,6 +27,13 @@ from .constants import (
     VIEW_SCORE,
 )
 from .utils import save_json, shanghai_today
+from .title_rules import title_only_rejection
+from .commodities import canonical_commodity, sector_for_commodity
+from .source_validation import (
+    is_concrete_http_url,
+    repair_source_urls,
+    view_evidence_rejection,
+)
 
 REQUIRED_FIELDS = {
     "company", "sector", "commodity", "view", "view_date", "source_date",
@@ -54,16 +61,30 @@ def record_quality(record: dict[str, Any]) -> tuple[int, int, int]:
             len(str(record.get("evidence", ""))))
 
 
-def validate_company_file(path: Path, key: str, target_date: str) -> dict[str, Any]:
+def validate_company_file(path: Path, key: str, target_date: str,
+                          documents: list[dict] | None = None) -> dict[str, Any]:
     company = COMPANY_KEYS[key]
     if not path.exists():
         return {"target_date": target_date, "company": company, "records": [],
                 "processing_status": "missing_llm_output", "rejected": [f"缺少输入文件 {path}"]}
     data = json.loads(path.read_text(encoding="utf-8-sig"))
     status = data.get("processing_status", "unknown")
-    rejected: list[str] = []
+    rejected: list[str] = [
+        "API校验："
+        + str(item.get("commodity") or "未知品种")
+        + "："
+        + str(item.get("reason") or "未说明原因")
+        for item in data.get("api_rejected", [])
+    ]
     candidates: list[dict[str, Any]] = []
-    for index, raw in enumerate(data.get("records", []), start=1):
+    repaired_records, url_rejected = repair_source_urls(
+        data.get("records", []), documents or [], company
+    )
+    rejected.extend(
+        f"URL校验：{item.get('commodity')}：{item.get('reason')}"
+        for item in url_rejected
+    )
+    for index, raw in enumerate(repaired_records, start=1):
         reasons = []
         if not isinstance(raw, dict):
             reasons.append("不是 object")
@@ -79,11 +100,20 @@ def validate_company_file(path: Path, key: str, target_date: str) -> dict[str, A
             if raw["confidence"] not in CONFIDENCE_LEVELS: reasons.append("confidence 非法")
             if raw["commodity"] == "碳酸锂" and raw["sector"] != "碳酸锂": reasons.append("碳酸锂板块错误")
             if raw["commodity"] == "多晶硅" and raw["sector"] != "多晶硅": reasons.append("多晶硅板块错误")
+            canonical = canonical_commodity(str(raw["commodity"]))
+            expected_sector = sector_for_commodity(canonical)
+            if canonical == "综合" and raw["sector"] in SECTORS: pass
+            elif expected_sector is None: reasons.append("品种不属于固定七个评分板块")
+            elif raw["sector"] != expected_sector: reasons.append(f"sector 应为 {expected_sector}")
             try:
                 if parse_date(raw["view_date"]) != target_date: reasons.append("view_date 非目标日")
                 if parse_date(raw["source_date"]) > target_date: reasons.append("source_date 晚于目标日")
             except ValueError as exc: reasons.append(str(exc))
-            if not re.match(r"^https?://", str(raw["source_url"]), re.I): reasons.append("source_url 非 http(s)")
+            if not is_concrete_http_url(raw["source_url"]): reasons.append("source_url 不是具体文章 URL")
+            evidence_reason = view_evidence_rejection(raw)
+            if evidence_reason: reasons.append(evidence_reason)
+            title_reason = title_only_rejection(raw)
+            if title_reason: reasons.append(title_reason)
         if reasons:
             rejected.append(f"第 {index} 条：{'；'.join(reasons)}")
             continue
@@ -228,7 +258,7 @@ def add_quality_sheet(wb: Workbook, company_data: dict[str, dict[str, Any]]):
     ws.append(headers); style_row(ws[1])
     for key,company in COMPANY_KEYS.items():
         data=company_data[key]; crawl=data.get("crawl",{}); status=data["processing_status"]
-        note="正常" if status=="ok" else "状态非 ok；汇总表可能沿用历史观点，单元格批注含来源日期。"
+        note="正常" if str(status).startswith("ok") else "状态非 ok；汇总表可能沿用历史观点，单元格批注含来源日期。"
         ws.append([company,status,crawl.get("status",""),len(data["records"]),len(data["rejected"]),note])
     start=ws.max_row+3; ws.cell(start,1,"公司 × 板块当日观点条数"); ws.merge_cells(start_row=start,start_column=1,end_row=start,end_column=8); style_row(ws[start])
     ws.append(["公司",*SECTORS]); style_row(ws[ws.max_row],BLUE)
@@ -243,20 +273,52 @@ def add_quality_sheet(wb: Workbook, company_data: dict[str, dict[str, Any]]):
     ws.freeze_panes="A2"
 
 
+def canonical_excel_path(target_date: str, output_root: str | Path = "output") -> Path:
+    stamp = target_date.replace("-", "")
+    return Path(output_root) / stamp / f"期货公司观点汇总_{stamp}.xlsx"
+
+
+def ensure_excel_output_available(target_date: str, output_root: str | Path = "output") -> Path:
+    """Fail before paid/long-running stages when the fixed output is open in Excel."""
+    excel = canonical_excel_path(target_date, output_root)
+    if not excel.exists():
+        return excel
+    try:
+        with excel.open("r+b"):
+            pass
+    except PermissionError as exc:
+        raise RuntimeError(
+            f"[输出文件被占用] 请关闭 Excel 中的文件后重新运行：{excel}。"
+            "程序不会另存‘更新版’，以保证每天只有一个固定结果文件。"
+        ) from exc
+    return excel
+
+
 def main() -> None:
     parser=argparse.ArgumentParser(description="校验四家公司 JSON，计算评分并输出日期 Excel")
     parser.add_argument("--date"); parser.add_argument("--input-root",default="data/llm_output"); parser.add_argument("--output-root",default="output")
     args=parser.parse_args(); target_date=args.date or shanghai_today(); stamp=target_date.replace("-","")
     input_dir=Path(args.input_root)/stamp; output_root=Path(args.output_root); output_dir=output_root/stamp; output_dir.mkdir(parents=True,exist_ok=True)
+    try:
+        requested_excel=ensure_excel_output_available(target_date, output_root)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+    normalized_path=Path("data/normalized")/stamp/"documents.json"
+    documents=(json.loads(normalized_path.read_text(encoding="utf-8")).get("documents", [])
+               if normalized_path.exists() else [])
     company_data={}
     for key in COMPANY_KEYS:
-        data=validate_company_file(input_dir/f"{key}.json",key,target_date); company_data[key]=data
+        data=validate_company_file(input_dir/f"{key}.json",key,target_date,documents); company_data[key]=data
         final_obj={k:v for k,v in data.items() if k not in {"rejected","input_record_count"}}
         final_obj["schema_version"]="1.0"; save_json(output_dir/f"{key}.json",final_obj)
     rows=build_matrix(company_data,output_root,stamp)
     wb=Workbook(); add_summary_sheet(wb,target_date,rows,company_data); add_detail_sheet(wb,company_data); add_quality_sheet(wb,company_data)
-    excel=output_dir/f"期货公司观点汇总_{stamp}.xlsx"; wb.save(excel)
-    save_json(output_dir/f"summary_{stamp}.json",{"target_date":target_date,"rows":rows})
+    excel=requested_excel
+    wb.save(excel)
+    save_json(output_dir/f"summary_{stamp}.json",{
+        "target_date":target_date,"rows":rows,"excel_file":str(excel),
+        "generated_at":datetime.now().isoformat(timespec="seconds"),
+    })
     print(excel)
 
 

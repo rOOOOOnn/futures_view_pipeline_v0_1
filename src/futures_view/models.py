@@ -9,7 +9,7 @@ class RawResearchItem:
     source_url: str
     source_type: str
     source_name: str
-    content_kind: str  # full_text | pdf_text | title_only | public_reprint
+    content_kind: str  # full_text | image_ocr | title_only | public_reprint
     content: str
     author: Optional[str] = None
     category: Optional[str] = None

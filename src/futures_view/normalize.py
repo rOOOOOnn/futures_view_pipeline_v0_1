@@ -3,7 +3,7 @@ import argparse, json, hashlib
 from pathlib import Path
 from .utils import save_json, shanghai_today
 
-VALID_KINDS={'full_text','pdf_text','title_only','public_reprint'}
+VALID_KINDS={'full_text','pdf_text','image_ocr','title_only','public_reprint'}
 
 def normalize_item(x: dict, target_date: str) -> dict:
     content=(x.get('content') or '').strip()

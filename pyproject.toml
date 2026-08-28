@@ -4,12 +4,15 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
   "playwright>=1.46.0",
-  "pypdf>=5.0.0",
   "python-dateutil>=2.9.0",
   "PyYAML>=6.0.1",
   "openpyxl>=3.1.5",
   "beautifulsoup4>=4.12.3",
   "lxml>=5.2.2",
+  "rapidocr>=3.0.0",
+  "opencv-python-headless>=4.10.0",
+  "onnxruntime>=1.20.0",
+  "openai>=1.68.0",
 ]
 
 [build-system]

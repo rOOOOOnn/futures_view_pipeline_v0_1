@@ -10,7 +10,7 @@ sources:
   gfqh:
     enabled: true
     company: 广发期货
-    mode: official_pdf
+    mode: official_daily_review_png_ocr
     start_url: https://rd.gfqh.cn/RDInformation/menu/235
 
   citicsf:
@@ -38,15 +38,19 @@ llm_web:
   profile_dir: browser_profile/llm
   headed: true
   new_chat_each_company: true
-  response_timeout_seconds: 300
+  response_timeout_seconds: 600
   response_stable_seconds: 15
   minimum_response_wait_seconds: 15
   cooldown_between_companies_seconds: 3
   max_submissions_per_run: 4
   deep_thinking: true
+  allow_anonymous: true
   prompt_delivery: auto
   prompt_upload_threshold_chars: 6000
   attachment_ready_timeout_seconds: 60
+  attachment_settle_seconds: 5
+  attachment_upload_attempts: 3
+  resume_successful_parts: true
   # 网页改版时通常只需要改这里，不改采集层。
   input_selectors:
     - '.ql-editor[contenteditable="true"]'
@@ -86,6 +90,8 @@ llm_web:
     - '[role="option"]:has-text("深度思考")'
     - 'text="深度思考"'
   generating_selectors:
+    - 'text="思考中"'
+    - '[class*="reasoner"]:has-text("思考中")'
     - 'button:has-text("停止生成")'
     - 'button[aria-label*="停止"]'
     - '[class*="stop-btn"]'
@@ -98,9 +104,26 @@ llm_web:
     - '.assistant-message'
     - '.markdown'
   new_chat_selectors:
+    - '.yb-new-chat-entry__item:has-text("新对话")'
     - 'text="新对话"'
     - '[title="新建对话"]'
     - '[aria-label="新建对话"]'
     - 'a[href*="new"]'
     - 'button[aria-label*="New chat"]'
     - 'button[aria-label*="新建"]'
+
+llm_api:
+  provider: tokenhub
+  base_url: "https://tokenhub-intl.tencentmaas.com/v1"
+  # TokenHub 联网搜索使用国内广州入口；普通分类仍可沿用上面的现有入口。
+  search_base_url: "https://tokenhub.tencentmaas.com/v1"
+  search_api_key_env: "TENCENT_TOKENHUB_SEARCH_API_KEY"
+  search_api_key_file: "secrets/tokenhub_search_api_key.txt"
+  api_key_env: "TENCENT_TOKENHUB_API_KEY"
+  api_key_file: "secrets/tokenhub_api_key.txt"
+  model: "hy3"
+  # 20-40条结构化观点通常只需约4k-7k；限制异常重复输出和无谓费用。
+  max_output_tokens: 10000
+  reasoning: false
+  dzqh_web_search: true
+  dzqh_search_source: "standard"

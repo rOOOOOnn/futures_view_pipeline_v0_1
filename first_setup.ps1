@@ -16,5 +16,6 @@ conda run --no-capture-output -n futures-view-system python -m pip install -e .
 conda run --no-capture-output -n futures-view-system python -m playwright install chromium
 
 Write-Host ""
-Write-Host "Environment setup completed. Before the first Yuanbao run, execute:"
-Write-Host "conda run --no-capture-output -n futures-view-system python -m futures_view.run --login-only"
+Write-Host "Environment setup completed. You can use TokenHub API or the Yuanbao browser backend."
+Write-Host "API: .\run_all.ps1 -LlmBackend api"
+Write-Host "Browser login (optional): conda run --no-capture-output -n futures-view-system python -m futures_view.run --login-only"

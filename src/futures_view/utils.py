@@ -3,7 +3,6 @@ import json, re
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from pypdf import PdfReader
 
 DATE_PATTERNS = [
     re.compile(r"(20\d{2})[-/\.](\d{1,2})[-/\.](\d{1,2})"),
@@ -33,13 +32,6 @@ def date_variants(date_str: str) -> list[str]:
 
 def contains_target_date(text: str, date_str: str) -> bool:
     return any(x in (text or "") for x in date_variants(date_str))
-
-def extract_pdf_text(path: Path) -> str:
-    try:
-        reader = PdfReader(str(path))
-        return clean_text("\n".join((p.extract_text() or "") for p in reader.pages))
-    except Exception:
-        return ""
 
 def save_json(path: Path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)

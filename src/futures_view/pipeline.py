@@ -15,10 +15,10 @@ async def crawl(args):
     selected=list(SCRAPERS) if args.company == 'all' else [args.company]
     all_items=[]; statuses={}
     async with browser_context(headed=args.headed) as context:
-        for key in selected:
+        for position, key in enumerate(selected, start=1):
             cls=SCRAPERS[key]
             if not cfg['sources'].get(key,{}).get('enabled',True): continue
-            print(f'[START] {key} {date}')
+            print(f'[官网进度 {position}/{len(selected)}] START {key} {date}', flush=True)
             s=cls(context,date,root,debug=args.debug)
             try: items=await s.scrape()
             except Exception as e:
@@ -28,7 +28,7 @@ async def crawl(args):
                 count=len([x for x in arr if x.get('source_title')])
                 statuses[key]={'status':'ok' if count else 'no_reports','count':count}
             save_json(root/f'{key}.json',{'target_date':date,'company':cfg['sources'][key]['company'],'crawl':statuses[key],'items':arr}); all_items.extend(arr)
-            print(f'[DONE] {key}: {len(arr)}')
+            print(f'[官网进度 {position}/{len(selected)}] DONE {key}: {len(arr)}', flush=True)
     # 单公司调试时保留同日期其他公司的已有结果，再重建 all_raw。
     merged_items=[]; merged_status={}
     for key in SCRAPERS:
