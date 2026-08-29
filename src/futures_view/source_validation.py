@@ -28,7 +28,7 @@ def view_evidence_rejection(record: dict) -> str | None:
     """Enforce the project's strict rule that neutral is not merely uncertain."""
     evidence = str(record.get("evidence") or "")
     if record.get("view") == "中性":
-        if re.search(r"震荡|区间|宽幅波动|盘整|整理|观望|横盘|多空均衡|供需均衡|暂无趋势", evidence):
+        if re.search(r"震荡|区间|宽幅波动|窄幅交投|盘整|整理|观望|横盘|多空均衡|供需均衡|暂无趋势", evidence):
             return None
         return "中性观点缺少区间、震荡、观望或均衡等明确证据"
 

@@ -4,7 +4,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from futures_view.finalize import consistency, ensure_excel_output_available, judgement
+from futures_view.finalize import (
+    consistency,
+    ensure_excel_output_available,
+    judgement,
+    prior_company_score,
+)
 from futures_view.build_prompts import compact_gtja_documents, extract_citicsf_coverage_candidates
 from futures_view.llm.api_llm import (
     _postprocess_records,
@@ -37,6 +42,29 @@ from futures_view.title_rules import directional_view_override, title_only_rejec
 
 
 class CoreTests(unittest.TestCase):
+    def test_history_carry_skips_missing_previous_day_and_uses_latest_sector_score(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "20260825").mkdir()
+            (root / "20260825" / "gfqh.json").write_text(json.dumps({
+                "records": [
+                    {"sector": "黑色系", "score": 1},
+                    {"sector": "黑色系", "score": -1},
+                ],
+            }), encoding="utf-8")
+            (root / "20260826").mkdir()
+            (root / "20260826" / "gfqh.json").write_text(json.dumps({
+                "records": [{"sector": "农产品", "score": 2}],
+            }), encoding="utf-8")
+            self.assertEqual(
+                prior_company_score(root, "20260827", "gfqh", "黑色系"),
+                (0.0, "20260825"),
+            )
+            self.assertEqual(
+                prior_company_score(root, "20260827", "gfqh", "贵金属"),
+                (None, None),
+            )
+
     def test_fixed_excel_output_refuses_lock_instead_of_making_update_copy(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "20260827" / "期货公司观点汇总_20260827.xlsx"
@@ -114,6 +142,7 @@ class CoreTests(unittest.TestCase):
 
     def test_neutral_requires_explicit_neutral_evidence(self):
         self.assertIsNone(view_evidence_rejection({"view": "中性", "evidence": "价格区间震荡"}))
+        self.assertIsNone(view_evidence_rejection({"view": "中性", "evidence": "钯：窄幅交投"}))
         self.assertIsNotNone(view_evidence_rejection({
             "view": "中性", "evidence": "期货计价升水，但现货仍承压",
         }))
@@ -201,6 +230,36 @@ class CoreTests(unittest.TestCase):
             [(item["commodity"], item["view"]) for item in records],
             [("燃料油", "看空"), ("低硫燃料油", "看空")],
         )
+
+    def test_gtja_python_supplement_keeps_every_explicit_multi_title_leg(self):
+        documents = [
+            {
+                "company_hint": "国泰海通期货", "source_date": "2026-08-27",
+                "source_type": "官方网站标题", "source_name": "国泰官网",
+                "source_title": "黄金：短暂下破4600美元后反弹 白银：宽幅震荡",
+                "source_url": "https://example.com/report/2",
+            },
+            {
+                "company_hint": "国泰海通期货", "source_date": "2026-08-27",
+                "source_type": "官方网站标题", "source_name": "国泰官网",
+                "source_title": "对二甲苯：短期不追空 PTA：多PX空PTA，反套持有 MEG：单边不追空",
+                "source_url": "https://example.com/report/3",
+            },
+        ]
+        records = gtja_deterministic_title_records(documents, "2026-08-27")
+        self.assertEqual(
+            {(item["commodity"], item["view"]) for item in records},
+            {("黄金", "看多"), ("白银", "中性"), ("PX", "看多"), ("PTA", "看空")},
+        )
+
+    def test_gtja_unknown_related_label_does_not_contaminate_known_commodity(self):
+        records = gtja_deterministic_title_records([{
+            "company_hint": "国泰海通期货", "source_date": "2026-08-27",
+            "source_type": "官方网站标题", "source_name": "国泰官网",
+            "source_title": "LPG：内外逻辑存分化 丙烯：短期现实偏强",
+            "source_url": "https://example.com/report/4",
+        }], "2026-08-27")
+        self.assertEqual(records, [])
 
     def test_title_only_requires_explicit_matching_direction(self):
         base = {"source_type": "官方网站标题", "view": "中性"}
@@ -308,8 +367,13 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(canonical_commodity("", "SP2701"), "纸浆")
         self.assertEqual(canonical_commodity("", "LG2701"), "原木")
         self.assertEqual(sector_for_commodity("胶版印刷纸"), "农产品")
-        self.assertEqual(sector_for_commodity("纸浆"), "农产品")
+        self.assertEqual(sector_for_commodity("纸浆"), "能化板块")
         self.assertEqual(sector_for_commodity("原木"), "农产品")
+        self.assertEqual(sector_for_commodity("不锈钢"), "黑色系")
+        self.assertEqual(sector_for_commodity("玻璃"), "黑色系")
+        self.assertEqual(sector_for_commodity("纯碱"), "黑色系")
+        self.assertEqual(canonical_commodity("豆一"), "豆一")
+        self.assertEqual(canonical_commodity("", "NR2701"), "20号胶")
 
     def test_sector_summary_records_are_not_false_duplicates(self):
         base = {"commodity": "综合", "view_date": "2026-08-27"}

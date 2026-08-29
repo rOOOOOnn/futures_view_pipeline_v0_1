@@ -8,11 +8,16 @@ from pathlib import Path
 
 from ..constants import COMPANY_KEYS, CONFIDENCE_LEVELS, SECTORS, VIEWS
 from ..build_prompts import extract_citicsf_coverage_candidates
-from ..title_rules import directional_view_override, infer_title_view, title_only_rejection
+from ..title_rules import (
+    directional_view_override,
+    infer_title_view,
+    infer_title_view_for_commodity,
+    relative_trade_view,
+    title_only_rejection,
+)
 from .browser_llm import parse_json_response
 from ..utils import load_yaml, save_json, shanghai_today
 from ..commodities import (
-    ALIASES,
     COMMODITY_SECTORS,
     UNSCORED_COMMODITIES,
     canonical_commodity,
@@ -300,11 +305,8 @@ def aggregate_call_usage(calls: list[dict]) -> dict:
 _GTJA_TITLE_LABELS = {
     "热轧卷板": "热卷", "铸造铝合金": "铝合金", "对二甲苯": "PX",
     "低硫燃料油": "低硫燃料油", "集运指数（欧线）": "集运欧线",
-    "集运指数(欧线)": "集运欧线", "MEG": "乙二醇", "豆一": "大豆",
+    "集运指数(欧线)": "集运欧线", "MEG": "乙二醇",
 }
-COMMODITY_KEYS_FOR_TITLES = set(COMMODITY_SECTORS) | set(ALIASES)
-
-
 def gfqh_deterministic_table_records(documents: list[dict], target_date: str) -> list[dict]:
     """Recover explicit directions from the already structured Guangfa daily table."""
     records = []
@@ -370,11 +372,11 @@ def citicsf_deterministic_coverage_records(
 
 
 def _gtja_title_segments(title: str) -> list[tuple[str, str]]:
-    labels = set(_GTJA_TITLE_LABELS)
-    labels.update(COMMODITY_KEYS_FOR_TITLES)
+    # Split every short label before a colon, including a non-scored related
+    # product (e.g. 丙烯). Filtering happens after splitting; this prevents the
+    # related product's direction from leaking into the preceding futures item.
     marker = re.compile(
-        "(" + "|".join(re.escape(label) for label in sorted(labels, key=len, reverse=True))
-        + r")\s*[：:]"
+        r"(?:^|(?<=\s))([A-Za-z][A-Za-z0-9（）()]{0,20}|[\u4e00-\u9fff（）()]{1,14})\s*[：:]"
     )
     matches = list(marker.finditer(title))
     if not matches:
@@ -395,11 +397,14 @@ def gtja_deterministic_title_records(documents: list[dict], target_date: str) ->
         if doc.get("company_hint") != "国泰海通期货" or doc.get("source_date") != target_date:
             continue
         title = str(doc.get("source_title") or "")
-        for commodity, evidence in _gtja_title_segments(title):
+        segments = _gtja_title_segments(title)
+        emitted: set[tuple[str, str]] = set()
+        for commodity, evidence in segments:
             sector = sector_for_commodity(commodity)
-            view = infer_title_view(evidence)
+            view = infer_title_view_for_commodity(evidence, commodity)
             if not sector or not view:
                 continue
+            emitted.add((commodity, view))
             records.append({
                 "company": "国泰海通期货", "sector": sector,
                 "commodity": commodity, "view": view,
@@ -408,6 +413,23 @@ def gtja_deterministic_title_records(documents: list[dict], target_date: str) ->
                 "source_name": doc.get("source_name") or "国泰君安期货研究资讯",
                 "source_title": title, "source_url": doc.get("source_url"),
                 "evidence": evidence, "confidence": "低",
+            })
+        # A relative-value instruction can sit in another commodity's segment,
+        # for example “对二甲苯：… PTA：多PX空PTA”. Recover both named legs.
+        for commodity, _ in segments:
+            sector = sector_for_commodity(commodity)
+            view = relative_trade_view(title, commodity)
+            if not sector or not view or (commodity, view) in emitted:
+                continue
+            emitted.add((commodity, view))
+            records.append({
+                "company": "国泰海通期货", "sector": sector,
+                "commodity": commodity, "view": view,
+                "view_date": target_date, "source_date": target_date,
+                "source_type": doc.get("source_type") or "官方网站标题",
+                "source_name": doc.get("source_name") or "国泰君安期货研究资讯",
+                "source_title": title, "source_url": doc.get("source_url"),
+                "evidence": title, "confidence": "低",
             })
     return records
 
