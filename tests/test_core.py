@@ -12,6 +12,8 @@ from futures_view.finalize import (
 )
 from futures_view.build_prompts import compact_gtja_documents, extract_citicsf_coverage_candidates
 from futures_view.llm.api_llm import (
+    _dzqh_processing_status,
+    _needs_dzqh_retry,
     _postprocess_records,
     _merge_by_commodity,
     aggregate_call_usage,
@@ -38,7 +40,9 @@ from futures_view.llm.browser_llm import (
 from futures_view.ocr import normalize_rapidocr_result
 from futures_view.scrapers.gfqh import GFQHScraper
 from futures_view.scrapers.citicsf import CITICSFScraper
+from futures_view.pipeline import crawl_result_status
 from futures_view.title_rules import directional_view_override, title_only_rejection
+from futures_view.utils import normalize_target_date
 
 
 class CoreTests(unittest.TestCase):
@@ -81,6 +85,26 @@ class CoreTests(unittest.TestCase):
         }]}))
         self.assertEqual(payload[0]["url"], "https://example.com/report")
         self.assertEqual(payload[0]["snippet"], "碳酸锂短期震荡偏强")
+
+    def test_dzqh_retries_when_search_evidence_is_missing(self):
+        accepted = [{"commodity": "铜"}]
+        self.assertTrue(_needs_dzqh_retry(accepted, {"search_results": []}))
+        self.assertTrue(_needs_dzqh_retry([], {
+            "search_results": [{"url": "https://example.com/report"}],
+        }))
+        self.assertFalse(_needs_dzqh_retry(accepted, {
+            "search_results": [{"url": "https://example.com/report"}],
+        }))
+
+    def test_dzqh_empty_result_is_not_a_search_failure(self):
+        self.assertEqual(_dzqh_processing_status(0, []), (
+            "llm_search_unavailable",
+            "TokenHub 响应未包含 search_results，联网搜索未实际生效",
+        ))
+        self.assertEqual(_dzqh_processing_status(8, []), ("ok_api_empty", None))
+        self.assertEqual(_dzqh_processing_status(8, [{"commodity": "铜"}]), (
+            "ok_api", None,
+        ))
 
     def test_gtja_prompt_compaction_removes_duplicate_title_text(self):
         defaults, documents = compact_gtja_documents([{
@@ -353,7 +377,12 @@ class CoreTests(unittest.TestCase):
 
     def test_daily_report_aliases_are_canonicalized(self):
         self.assertEqual(canonical_commodity("蛋白粕"), "粕类")
+        self.assertEqual(canonical_commodity("化工"), "综合")
         self.assertEqual(canonical_commodity("化工综合"), "综合")
+        self.assertEqual(canonical_commodity("螺纹"), "螺纹钢")
+        self.assertEqual(canonical_commodity("硅锰"), "锰硅")
+        self.assertEqual(canonical_commodity("丙烯"), "丙烯")
+        self.assertIsNone(sector_for_commodity("丙烯"))
         self.assertEqual(canonical_commodity("黑色系综合"), "综合")
         self.assertEqual(canonical_commodity("有色金属板块"), "综合")
         self.assertEqual(canonical_commodity("集运指数（欧线）"), "集运欧线")
@@ -374,6 +403,21 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(sector_for_commodity("纯碱"), "黑色系")
         self.assertEqual(canonical_commodity("豆一"), "豆一")
         self.assertEqual(canonical_commodity("", "NR2701"), "20号胶")
+
+    def test_empty_crawl_is_not_confused_with_unresolved_access(self):
+        self.assertEqual(crawl_result_status([]), {
+            "status": "no_source_reports", "count": 0,
+        })
+        self.assertEqual(crawl_result_status([{
+            "source_title": "", "crawl_status": "unresolved_source_access",
+        }]), {
+            "status": "unresolved_source_access", "count": 0,
+        })
+
+    def test_target_date_requires_zero_padded_iso_format(self):
+        self.assertEqual(normalize_target_date("2026-09-04"), "2026-09-04")
+        with self.assertRaisesRegex(ValueError, "YYYY-MM-DD"):
+            normalize_target_date("2026-09-4")
 
     def test_sector_summary_records_are_not_false_duplicates(self):
         base = {"commodity": "综合", "view_date": "2026-08-27"}

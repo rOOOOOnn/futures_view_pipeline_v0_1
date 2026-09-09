@@ -10,6 +10,20 @@ from .scrapers.gtjaqh import GTJAQHScraper
 
 SCRAPERS={'gfqh':GFQHScraper,'citicsf':CITICSFScraper,'gtjaqh':GTJAQHScraper}
 
+
+def crawl_result_status(items: list[dict]) -> dict:
+    """Distinguish a genuine empty day from a scraper that could not read its source."""
+    count = len([item for item in items if item.get('source_title')])
+    if count:
+        return {'status': 'ok', 'count': count}
+    unresolved = next((
+        str(item.get('crawl_status')) for item in items
+        if item.get('crawl_status') == 'unresolved_source_access'
+    ), None)
+    if unresolved:
+        return {'status': unresolved, 'count': 0}
+    return {'status': 'no_source_reports', 'count': 0}
+
 async def crawl(args):
     cfg=load_yaml(args.config); date=args.date or shanghai_today(); root=Path(f'data/raw/{date.replace("-","")}'); root.mkdir(parents=True,exist_ok=True)
     selected=list(SCRAPERS) if args.company == 'all' else [args.company]
@@ -25,8 +39,7 @@ async def crawl(args):
                 print(f'[ERROR] {key}: {e}'); items=[]; statuses[key]={'status':'error','error':f'{type(e).__name__}: {e}'}
             arr=[x.to_dict() for x in items]
             if key not in statuses:
-                count=len([x for x in arr if x.get('source_title')])
-                statuses[key]={'status':'ok' if count else 'no_reports','count':count}
+                statuses[key]=crawl_result_status(arr)
             save_json(root/f'{key}.json',{'target_date':date,'company':cfg['sources'][key]['company'],'crawl':statuses[key],'items':arr}); all_items.extend(arr)
             print(f'[官网进度 {position}/{len(selected)}] DONE {key}: {len(arr)}', flush=True)
     # 单公司调试时保留同日期其他公司的已有结果，再重建 all_raw。

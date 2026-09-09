@@ -185,6 +185,21 @@ def _search_results_evidence(search_meta: dict) -> str:
     return json.dumps(compact, ensure_ascii=False, indent=2)
 
 
+def _needs_dzqh_retry(accepted_records: list[dict], search_meta: dict) -> bool:
+    """Retry when validated records or tool-returned source evidence is missing."""
+    return not accepted_records or not search_meta.get("search_results")
+
+
+def _dzqh_processing_status(search_result_count: int, accepted_records: list[dict]
+                             ) -> tuple[str, str | None]:
+    """Separate a broken search from a successful search with no reliable views."""
+    if search_result_count == 0:
+        return "llm_search_unavailable", "TokenHub 响应未包含 search_results，联网搜索未实际生效"
+    if not accepted_records:
+        return "ok_api_empty", None
+    return "ok_api", None
+
+
 def _postprocess_records(records: list[dict], documents: list[dict], company: str
                          ) -> tuple[list[dict], list[dict]]:
     structurally_valid = []
@@ -546,10 +561,19 @@ def main() -> None:
                 rejected.extend(deterministic_rejected)
             data["records"] = accepted
             data["api_rejected"] = rejected
-            if str(data.get("processing_status", "")).startswith("ok_api"):
+            if entry["key"] == "dzqh":
+                search_result_count = sum(
+                    len((call.get("search") or {}).get("search_results") or [])
+                    for call in (data.get("api") or {}).get("calls", [])
+                )
+                status, error = _dzqh_processing_status(search_result_count, accepted)
+                data["processing_status"] = status + "_revalidated" if status.startswith("ok") else status
+                data["errors"] = [{"error": error}] if error else []
+            elif str(data.get("processing_status", "")).startswith("ok_api"):
                 data["processing_status"] = "ok_api_revalidated"
             for part in data.get("parts", []):
                 part["records"] = len(accepted)
+                part["status"] = data["processing_status"]
             save_json(company_path, data)
             print(f"[重校验] {entry['company']}: 保留={len(accepted)}，拒绝={len(rejected)}，未调用API")
         return
@@ -654,8 +678,13 @@ def main() -> None:
                 raw = raw + "\n\n--- PRIMARY RETRY ---\n" + retry_raw
                 result = retry_result
 
-            if key == "dzqh" and not result.get("records"):
-                print(f"[{index}/{len(entries)}] {company}: 首轮为 0，按公众号优先规则补充检索…")
+            accepted, rejected = _postprocess_records(
+                result.get("records", []), documents, company
+            )
+
+            if key == "dzqh" and _needs_dzqh_retry(accepted, discovery_search):
+                retry_reason = "校验后为 0" if not accepted else "搜索证据为空"
+                print(f"[{index}/{len(entries)}] {company}: 首轮{retry_reason}，按公众号优先规则补充检索…")
                 retry_discovery, retry_discovery_usage, retry_search = _call_text_model(
                     search_client, api, _dzqh_discovery_prompt(target_date, focused=True), extra_body
                 )
@@ -680,10 +709,11 @@ def main() -> None:
                     + "\n\n--- FOCUSED CLASSIFICATION ---\n" + retry_raw
                 )
                 result = retry_result
-
-            accepted, rejected = _postprocess_records(
-                result.get("records", []), documents, company
-            )
+                retry_accepted, retry_rejected = _postprocess_records(
+                    retry_result.get("records", []), documents, company
+                )
+                accepted = retry_accepted
+                rejected.extend(retry_rejected)
 
             if key == "gfqh":
                 deterministic_records = gfqh_deterministic_table_records(documents, target_date)
@@ -762,19 +792,15 @@ def main() -> None:
                     accepted = []
 
             result["records"] = accepted
-            status = "ok_api"
             errors: list[dict] = []
             if key == "dzqh":
-                if dzqh_search_result_count == 0:
-                    status = "llm_search_unavailable"
-                    errors.append({
-                        "error": "TokenHub 响应未包含 search_results，联网搜索未实际生效"
-                    })
-                elif not accepted:
-                    status = "llm_search_empty"
-                    errors.append({
-                        "error": "东证两轮联网检索均未取得带真实文章 URL 的当天可靠观点"
-                    })
+                status, error = _dzqh_processing_status(
+                    dzqh_search_result_count, accepted
+                )
+                if error:
+                    errors.append({"error": error})
+            else:
+                status = "ok_api"
             aggregate_usage = aggregate_call_usage(calls)
             output = {
                 **result,

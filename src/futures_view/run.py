@@ -6,7 +6,7 @@ import sys
 
 from .constants import COMPANY_KEYS
 from .finalize import ensure_excel_output_available
-from .utils import shanghai_today
+from .utils import normalize_target_date
 
 
 def call(module: str, *arguments: str) -> None:
@@ -28,7 +28,10 @@ def main() -> None:
     parser.add_argument("--llm-backend", choices=["browser", "api"], default="api",
                         help="LLM执行方式；默认腾讯TokenHub api，browser仅作备用")
     args = parser.parse_args()
-    date = args.date or shanghai_today()
+    try:
+        date = normalize_target_date(args.date)
+    except ValueError as exc:
+        parser.error(str(exc))
     stage_number = {"crawl": 1, "prepare": 2, "llm": 3, "finalize": 4}
 
     def announce(stage: str, detail: str) -> None:

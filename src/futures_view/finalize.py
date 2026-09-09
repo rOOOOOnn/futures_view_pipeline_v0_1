@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -9,6 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
+from openpyxl.chart import Reference, ScatterChart, Series
+from openpyxl.chart.label import DataLabelList
+from openpyxl.chart.shapes import GraphicalProperties
 from openpyxl.comments import Comment
 from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -46,6 +50,7 @@ CONFIDENCE_PRIORITY = {"高": 3, "中": 2, "低": 1}
 NAVY, BLUE, WHITE, BLACK = "1F4E78", "5B9BD5", "FFFFFF", "1F1F1F"
 YELLOW, RED, GREEN, GRAY = "FFF2CC", "F4CCCC", "D9EAD3", "E7E6E6"
 FONT = "Microsoft YaHei"
+CHART_SECTORS = ("黑色系", "贵金属", "农产品", "有色金属", "能化板块")
 
 
 def parse_date(value: Any) -> str:
@@ -196,6 +201,227 @@ def style_row(cells, fill=NAVY, color=WHITE):
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
 
+def _hide_series_line(series: Series) -> None:
+    series.graphicalProperties.line.solidFill = WHITE
+    series.graphicalProperties.line.width = 1000
+
+
+def _style_marker_series(series: Series, symbol: str, size: int, color: str) -> None:
+    _hide_series_line(series)
+    series.marker.symbol = symbol
+    series.marker.size = size
+    series.marker.graphicalProperties.solidFill = color
+    series.marker.graphicalProperties.line.noFill = True
+
+
+def add_divergence_chart(ws, target_date: str, rows: list[dict[str, Any]]) -> None:
+    """Add the editable institution-score range chart below the summary table."""
+    row_by_sector = {row["sector"]: row for row in rows}
+    chart_rows = [row_by_sector[sector] for sector in CHART_SECTORS if sector in row_by_sector]
+    if not chart_rows:
+        return
+
+    summary_row_by_sector = {row["sector"]: index for index, row in enumerate(rows, start=4)}
+    chart_summary_rows = [summary_row_by_sector[row["sector"]] for row in chart_rows]
+    if chart_summary_rows != list(range(chart_summary_rows[0], chart_summary_rows[0] + len(chart_rows))):
+        raise ValueError("分歧图所需板块在汇总表中必须连续排列")
+
+    helper_headers = [
+        "纵向位置", *[f"{company}位置" for company in COMPANIES], "均值位置",
+        "最低分", "最高分", "区间起点纵坐标", "区间终点纵坐标", "标签横坐标",
+        "零轴横坐标", "零轴纵坐标", "刻度横坐标", "刻度纵坐标",
+    ]
+    for column, value in enumerate(helper_headers, start=11):
+        ws.cell(3, column, value)
+
+    all_scores: list[float] = []
+    for helper_index, row in enumerate(chart_rows):
+        excel_row = chart_summary_rows[helper_index]
+        y_position = len(chart_rows) - helper_index
+        scores = [row["scores"][company] for company in COMPANIES]
+        available = [float(score) for score in scores if score is not None]
+        all_scores.extend(available)
+
+        duplicate_counts = Counter(float(score) for score in scores if score is not None)
+        seen: Counter[float] = Counter()
+        jittered_positions = []
+        for score in scores:
+            if score is None:
+                jittered_positions.append(y_position)
+                continue
+            numeric_score = float(score)
+            seen[numeric_score] += 1
+            offset = (seen[numeric_score] - (duplicate_counts[numeric_score] + 1) / 2) * 0.12
+            jittered_positions.append(y_position + offset)
+
+        minimum = min(available) if available else None
+        maximum = max(available) if available else None
+        helper_values = [
+            y_position, *jittered_positions, y_position + 0.24, minimum, maximum,
+            y_position, y_position, None, None, None,
+        ]
+        for column, value in enumerate(helper_values, start=11):
+            ws.cell(excel_row, column, value)
+
+    data_minimum = min(all_scores) if all_scores else -2.0
+    data_maximum = max(all_scores) if all_scores else 2.0
+    score_span = max(data_maximum - data_minimum, 1.0)
+    left_padding = min(0.50, max(0.20, 0.32 * score_span))
+    right_padding = min(0.25, max(0.10, 0.08 * score_span))
+    label_padding = min(0.25, max(0.10, 0.12 * score_span))
+    axis_minimum = min(data_minimum, 0.0) - left_padding
+    axis_maximum = max(data_maximum, 0.0) + right_padding
+    label_x = min(data_minimum, 0.0) - label_padding
+
+    for excel_row in chart_summary_rows:
+        ws.cell(excel_row, 21, label_x)
+    ws.cell(chart_summary_rows[0], 22, 0.0)
+    ws.cell(chart_summary_rows[0] + 1, 22, 0.0)
+    ws.cell(chart_summary_rows[0], 23, 0.55)
+    ws.cell(chart_summary_rows[0] + 1, 23, len(chart_rows) + 0.55)
+    tick_start = math.ceil(axis_minimum / 0.5) * 0.5
+    tick_end = math.floor(axis_maximum / 0.5) * 0.5
+    tick_values = [
+        tick_start + index * 0.5
+        for index in range(int(round((tick_end - tick_start) / 0.5)) + 1)
+    ]
+    for index, tick_value in enumerate(tick_values, start=chart_summary_rows[0]):
+        ws.cell(index, 24, tick_value)
+        ws.cell(index, 25, 0.55)
+
+    chart = ScatterChart()
+    chart.style = 2
+    chart.scatterStyle = "lineMarker"
+    chart.title = f"机构观点与分歧 | {target_date}"
+    chart.height = 12.5
+    chart.width = 24
+    chart.legend = None
+    chart.roundedCorners = False
+    chart.graphical_properties = GraphicalProperties()
+    chart.graphical_properties.line.solidFill = "D9D9D9"
+    chart.visible_cells_only = False
+    chart.display_blanks = "gap"
+
+    chart.x_axis.title = "观点评分（越高越偏多，0为中性）"
+    chart.x_axis.axPos = "b"
+    chart.x_axis.scaling.min = axis_minimum
+    chart.x_axis.scaling.max = axis_maximum
+    chart.x_axis.majorUnit = 0.5
+    chart.x_axis.numFmt = "0.0"
+    chart.x_axis.majorTickMark = "none"
+    chart.x_axis.tickLblPos = "none"
+    chart.x_axis.crossesAt = 0.45
+    chart.x_axis.spPr = GraphicalProperties()
+    chart.x_axis.spPr.line.noFill = True
+    chart.x_axis.majorGridlines.spPr = GraphicalProperties()
+    chart.x_axis.majorGridlines.spPr.line.solidFill = "EEEEEE"
+    chart.x_axis.majorGridlines.spPr.line.width = 6668
+    chart.y_axis.scaling.min = 0.45
+    chart.y_axis.scaling.max = len(chart_rows) + 0.65
+    chart.y_axis.axPos = "l"
+    chart.y_axis.majorUnit = 1
+    chart.y_axis.delete = True
+    chart.y_axis.majorGridlines = None
+    chart.y_axis.majorTickMark = "none"
+    chart.y_axis.crossesAt = axis_minimum
+    chart.y_axis.spPr = GraphicalProperties()
+    chart.y_axis.spPr.line.noFill = True
+
+    for excel_row, row in zip(chart_summary_rows, chart_rows):
+        x_values = Reference(ws, min_col=17, max_col=18, min_row=excel_row, max_row=excel_row)
+        y_values = Reference(ws, min_col=19, max_col=20, min_row=excel_row, max_row=excel_row)
+        series = Series(y_values, x_values, title=f"{row['sector']}区间")
+        series.marker.symbol = "none"
+        series.graphicalProperties.line.solidFill = "B9BEC4"
+        series.graphicalProperties.line.width = 11000
+        chart.series.append(series)
+
+    zero_x = Reference(
+        ws, min_col=22, min_row=chart_summary_rows[0], max_row=chart_summary_rows[0] + 1
+    )
+    zero_y = Reference(
+        ws, min_col=23, min_row=chart_summary_rows[0], max_row=chart_summary_rows[0] + 1
+    )
+    zero_series = Series(zero_y, zero_x, title="中性基准")
+    zero_series.marker.symbol = "none"
+    zero_series.graphicalProperties.line.solidFill = "B9BEC4"
+    zero_series.graphicalProperties.line.width = 11000
+    chart.series.append(zero_series)
+
+    first_row, last_row = chart_summary_rows[0], chart_summary_rows[-1]
+    for company_index, company in enumerate(COMPANIES):
+        x_values = Reference(ws, min_col=2 + company_index, min_row=first_row, max_row=last_row)
+        y_values = Reference(ws, min_col=12 + company_index, min_row=first_row, max_row=last_row)
+        series = Series(y_values, x_values, title=company)
+        _style_marker_series(series, "circle", 6, "7A7D80")
+        chart.series.append(series)
+
+    mean_x = Reference(ws, min_col=6, min_row=first_row, max_row=last_row)
+    mean_y = Reference(ws, min_col=16, min_row=first_row, max_row=last_row)
+    mean_series = Series(mean_y, mean_x, title="机构均值")
+    _style_marker_series(mean_series, "diamond", 9, "2865C5")
+    mean_series.dLbls = DataLabelList()
+    mean_series.dLbls.showCatName = True
+    mean_series.dLbls.showSerName = False
+    mean_series.dLbls.showVal = False
+    mean_series.dLbls.showLegendKey = False
+    mean_series.dLbls.showPercent = False
+    mean_series.dLbls.showBubbleSize = False
+    mean_series.dLbls.numFmt = "0.0"
+    mean_series.dLbls.dLblPos = "t"
+    chart.series.append(mean_series)
+
+    for excel_row, row in zip(chart_summary_rows, chart_rows):
+        label_x_values = Reference(ws, min_col=21, min_row=excel_row, max_row=excel_row)
+        label_y_values = Reference(ws, min_col=11, min_row=excel_row, max_row=excel_row)
+        label_series = Series(label_y_values, label_x_values, title=row["sector"])
+        _hide_series_line(label_series)
+        label_series.marker.symbol = "circle"
+        label_series.marker.size = 2
+        label_series.marker.graphicalProperties.solidFill = WHITE
+        label_series.marker.graphicalProperties.line.noFill = True
+        label_series.dLbls = DataLabelList()
+        label_series.dLbls.showSerName = True
+        label_series.dLbls.showCatName = False
+        label_series.dLbls.showVal = False
+        label_series.dLbls.showLegendKey = False
+        label_series.dLbls.showPercent = False
+        label_series.dLbls.showBubbleSize = False
+        label_series.dLbls.dLblPos = "l"
+        chart.series.append(label_series)
+
+    for index, tick_value in enumerate(tick_values, start=chart_summary_rows[0]):
+        tick_x_values = Reference(ws, min_col=24, min_row=index, max_row=index)
+        tick_y_values = Reference(ws, min_col=25, min_row=index, max_row=index)
+        tick_series = Series(tick_y_values, tick_x_values, title=f"{tick_value:.1f}")
+        _hide_series_line(tick_series)
+        tick_series.marker.symbol = "circle"
+        tick_series.marker.size = 2
+        tick_series.marker.graphicalProperties.solidFill = WHITE
+        tick_series.marker.graphicalProperties.line.noFill = True
+        tick_series.dLbls = DataLabelList()
+        tick_series.dLbls.showSerName = True
+        tick_series.dLbls.showCatName = False
+        tick_series.dLbls.showVal = False
+        tick_series.dLbls.showLegendKey = False
+        tick_series.dLbls.showPercent = False
+        tick_series.dLbls.showBubbleSize = False
+        tick_series.dLbls.dLblPos = "b"
+        chart.series.append(tick_series)
+
+    ws.add_chart(chart, "A12")
+    ws.merge_cells("A38:I38")
+    ws["A38"] = "灰点：机构评分    蓝色菱形：机构均值    灰线：最低分至最高分"
+    ws.merge_cells("A39:I39")
+    ws["A39"] = "重合点仅上下错开，横向评分保持原值。"
+    ws.merge_cells("A40:I40")
+    ws["A40"] = "图表比较五个大类板块；碳酸锂和多晶硅保留在上方汇总表中。"
+    for row_number in (38, 39, 40):
+        ws.cell(row_number, 1).font = Font(name=FONT, size=9, color="666666")
+        ws.cell(row_number, 1).alignment = Alignment(vertical="center")
+    ws.column_dimensions.group("K", "Y", hidden=True)
+
+
 def add_summary_sheet(wb: Workbook, target_date: str, rows: list[dict[str, Any]], company_data: dict[str, dict[str, Any]]):
     ws = wb.active; ws.title = "期货观点汇总"; ws.sheet_view.showGridLines = False
     ws.merge_cells("A1:I1"); ws["A1"] = f"期货公司板块观点评分矩阵 | {target_date}"
@@ -232,6 +458,7 @@ def add_summary_sheet(wb: Workbook, target_date: str, rows: list[dict[str, Any]]
     widths = {"A":14,"B":15,"C":15,"D":18,"E":15,"F":13,"G":13,"H":11,"I":14}
     for column, width in widths.items(): ws.column_dimensions[column].width = width
     ws.freeze_panes = "B4"; ws.auto_filter.ref = f"A3:I{end}"
+    add_divergence_chart(ws, target_date, rows)
 
 
 def add_detail_sheet(wb: Workbook, company_data: dict[str, dict[str, Any]]):

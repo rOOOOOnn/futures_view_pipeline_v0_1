@@ -12,6 +12,20 @@ DATE_PATTERNS = [
 def shanghai_today() -> str:
     return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
 
+
+def normalize_target_date(value: str | None) -> str:
+    """Return a canonical date and reject ambiguous values such as 2026-09-4."""
+    if not value:
+        return shanghai_today()
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"日期必须使用 YYYY-MM-DD 格式，例如 2026-09-04；收到：{value}") from exc
+    canonical = parsed.strftime("%Y-%m-%d")
+    if canonical != value:
+        raise ValueError(f"日期必须使用 YYYY-MM-DD 格式，例如 2026-09-04；收到：{value}")
+    return canonical
+
 def clean_text(text: str) -> str:
     text = (text or "").replace("\u00a0", " ")
     text = re.sub(r"[ \t]+", " ", text)
