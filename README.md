@@ -31,7 +31,7 @@ output/20260825/
   期货公司观点汇总_20260825.xlsx
 ```
 
-项目同时维护 `data/view_database.sqlite3`。`view_history` 永久追加所有已校验的日度观点，
+项目同时维护 `data/view_database.sqlite3`。`view_history` 按记录唯一键去重追加所有已校验的日度观点，
 `current_company_views` 保存每家机构各品种的最新方向，`current_view_fields` 按品种分别滚动更新
 供给、需求、库存、核心逻辑和中期展望。当天未出现的字段沿用旧值，出现新内容时只替换对应字段。
 每个当前字段同时保留来源机构、观点日期、标题和 URL，避免把历史沿用误认为当天新观点。
@@ -90,7 +90,7 @@ API 首选使用 `hy3`。普通分类的接入地域应按 TokenHub 服务和 AP
 
 一般在中国大陆使用可优先选择广州，面向全球可选择新加坡；最终必须以 API Key 所属站点为准，广州和新加坡 Key 不互通。项目当前配置使用广州入口做普通分类，与广州“启用管理”页面显示的免费额度保持一致。腾讯官方说明见 [TokenHub API 使用说明](https://cloud.tencent.com/document/product/1823/130078)。
 
-普通分类的模型顺序由 `llm_api.model` 和 `llm_api.model_fallbacks` 配置，当前为 `hy3` → `deepseek-v4-flash` → `deepseek-v4-pro`。只有接口返回 HTTP 402（免费额度耗尽、且未开通后付费等额度类错误）时才自动切换到下一个模型；429 限流、网络故障或返回格式异常仍按原错误处理，避免误判。某个备用模型成功后，本次运行的后续任务会优先继续使用它，并在结果文件中记录实际模型和此前失败的尝试。额度规则见 [在线推理服务说明](https://cloud.tencent.com/document/product/1823/130087)。
+TokenHub 模型调用顺序由 `llm_api.model` 和 `llm_api.model_fallbacks` 配置，当前为 `hy3` → `deepseek-v4-flash` → `deepseek-v4-pro`，同时适用于普通分类和东证联网搜索兜底。只有接口返回 HTTP 402（免费额度耗尽、且未开通后付费等额度类错误）时才自动切换到下一个模型；429 限流、网络故障或返回格式异常仍按原错误处理，避免误判。某个备用模型成功后，本次运行的后续任务会优先继续使用它，并在结果文件中记录实际模型和此前失败的尝试。额度规则见 [在线推理服务说明](https://cloud.tencent.com/document/product/1823/130087)。
 
 东证现在和另外三家公司一样，主流程直接从官网 WordPress API 定位当天晨报。程序保留网页简短摘要，并在本地从官方 PDF 逐品种提取“总结与展望”；新闻全文、行情明细和免责声明不会送入模型，避免浪费 Token。只有官网 API、PDF 下载或摘要提取失败时，才启用 TokenHub 联网搜索作为兜底。若需要配置这项可选兜底，可在广州站创建 Key、开通联网搜索资源包，然后运行：
 
@@ -115,7 +115,7 @@ API 首选使用 `hy3`。普通分类的接入地域应按 TokenHub 服务和 AP
 官网调试时才需要增加 `-Headed -Debug`。总入口依次运行：
 
 1. 四家公司官网采集；
-2. 标准化并生成三份精简模型 Prompt及一份国泰本地任务；
+2. 标准化并生成三份精简模型 Prompt 及一份国泰本地任务；
 3. 用 TokenHub API 处理广发、中信和东证，同时用 Python 处理国泰；
 4. 校验四份 JSON，生成评分矩阵和 Excel。
 
@@ -239,7 +239,7 @@ conda run --no-capture-output -n futures-view-system python -m futures_view.insp
 只有最后出现 `完整性结论: 通过自动质量门禁`，整次运行才算成功。若终端最后出现
 `[阶段失败] futures_view.inspect_run`，前面的 Excel 只是待检查产物，不应直接使用；根据其后列出的未映射品种、重复、URL、日期或覆盖遗漏修复后再重跑。
 
-一次已验证的正常输出示例（2026-08-28）：三家官网采集分别为1、15、59条，最终JSON和Excel明细均为104条，重复、非法和明确规则遗漏均为0。
+一次已验证的正常输出示例（2026-09-11）：广发、中信、国泰和东证官网分别采集1、22、58、1条，分类输出分别为40、21、29、18条，最终 JSON 和 Excel 明细均为108条，重复、非法和明确规则遗漏均为0。
 
 自动分类有三层防护：API 严格 Schema 只允许统一品种名；广发结构化表格、中信明确小标题和国泰标题均由 Python 做确定性补漏；证据方向不足或同时存在明确相反信号时留空，不会为提高覆盖率强行打分。
 
@@ -252,7 +252,7 @@ conda run --no-capture-output -n futures-view-system python -m futures_view.insp
 - `cached_tokens`：缓存命中输入；
 - `web_search_calls`：实际搜索引擎调用次数。
 
-项目将普通结构化输出限制为10,000 Token，东证分类限制为8,000 Token，避免模型异常重复生成到20,000 Token。2026年8月实测完整运行通常约0.15～0.30元/次；价格和免费额度可能变化，应以腾讯 TokenHub 控制台和官方价格页为准。重校验命令 `--revalidate-existing` 只处理已保存响应，不调用API。
+项目将普通结构化输出限制为10,000 Token，东证分类限制为8,000 Token，避免模型异常重复生成到20,000 Token。2026-09-11 的已验证运行中，广发、中信和东证合计使用39,238个 Token，国泰为本地零 Token；每日用量会随官网报告数量和篇幅变化。价格和免费额度应以腾讯 TokenHub 控制台和官方价格页为准。重校验命令 `--revalidate-existing` 只处理已保存响应，不调用 API。
 
 国泰海通不计入 API 用量：官网标题先由 Python 拆分品种，再用固定短语和交易建议规则分类，输出状态为 `ok_python`。
 
