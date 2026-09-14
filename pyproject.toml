@@ -5,6 +5,7 @@ requires-python = ">=3.11"
 dependencies = [
   "playwright>=1.46.0",
   "python-dateutil>=2.9.0",
+  "pypdf>=5.0.0",
   "PyYAML>=6.0.1",
   "openpyxl>=3.1.5",
   "beautifulsoup4>=4.12.3",

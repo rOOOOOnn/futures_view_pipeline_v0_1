@@ -44,7 +44,7 @@ def main() -> None:
 
     print(f"=== {target_date} 运行检查 ===")
     print("\n[1/4] 官网采集")
-    for key in ("gfqh", "citicsf", "gtjaqh"):
+    for key in COMPANY_KEYS:
         data = load_json(raw_dir / f"{key}.json")
         items = data.get("items", [])
         valid = [item for item in items if item.get("source_title")]

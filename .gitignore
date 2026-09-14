@@ -17,5 +17,6 @@ data/llm_output/
 data/final/
 data/pdfs/
 data/debug/
+data/*.sqlite3
 output/
 tmp/

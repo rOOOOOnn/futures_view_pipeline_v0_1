@@ -30,15 +30,17 @@
 - 期权结构和跨品种套利不能机械拆成标的单边观点。
 
 四、来源规则
+- INPUT.source_defaults 是该公司所有 source_documents 共用的来源字段；输出记录时必须与对应文档的日期、标题和 URL 一起使用。
 - full_text/pdf_text：以策略结论、展望和明确未来方向为证据。
 - 广发期货的 gfqh_daily_review_table_v1：必须逐行处理 rows；只能使用该行 comment 和 advice，禁止跨行拼接；sector 必须严格复制该行 sector_hint；scored=false 的行不输出。只要该行对未来方向有可靠判断就应输出，不得因行数较多而抽样或遗漏。
 - title_only：这是用户明确允许的国泰特殊口径。只有标题本身同时明确商品与未来方向时输出，confidence=低；模糊标题不输出。套利标题仍不得拆成单边观点。
 - evidence 必须是来源原文短摘录或高度忠实压缩，同时支持商品和未来方向，不得写分类推理。
+- supply、demand、inventory、core_logic、medium_outlook 用于建立滚动观点库：分别提取供给、需求、库存、核心逻辑和明确的中期/中长期展望。只能忠实摘录或压缩当前来源；来源没有提到的字段必须填空字符串，禁止用常识补写。core_logic 可概括来源明确表达的主要矛盾；medium_outlook 只有来源明确给出中期或中长期判断时才填写。
 - view_date 必须等于 INPUT.target_date；source_date 使用来源日期。历史观点不输出。
 - 同公司、同商品、同日多来源只保留证据质量最高或时间更新的一条。
 - 中信期货：必须逐行检查正文中的“品种：观点”小标题。INPUT.coverage_candidates 是 Python 从正文中提取的覆盖检查清单，不是额外来源；每项都必须核对，若 statement 对未来方向明确则输出，若不明确才可跳过。输出前按 commodity_hint 逐项反查，禁止只处理报告标题提到的品种。
 
 五、输出
 只返回一个合法 JSON object，不要 Markdown、代码块、解释或前后文字：
-{"target_date":"YYYY-MM-DD","company":"公司名","records":[{"company":"公司名","sector":"板块","commodity":"品种","view":"五档观点","view_date":"YYYY-MM-DD","source_date":"YYYY-MM-DD","source_type":"来源类型","source_name":"来源名称","source_title":"真实标题","source_url":"真实http(s) URL","evidence":"证据","confidence":"高/中/低"}]}
+{"target_date":"YYYY-MM-DD","company":"公司名","records":[{"company":"公司名","sector":"板块","commodity":"品种","view":"五档观点","view_date":"YYYY-MM-DD","source_date":"YYYY-MM-DD","source_type":"来源类型","source_name":"来源名称","source_title":"真实标题","source_url":"真实http(s) URL","evidence":"证据","confidence":"高/中/低","supply":"供给信息或空字符串","demand":"需求信息或空字符串","inventory":"库存信息或空字符串","core_logic":"核心逻辑或空字符串","medium_outlook":"明确中期展望或空字符串"}]}
 没有可靠观点时 records=[]。score 不需要模型计算，后续 Python 会按五档固定映射为 -2 至 2。

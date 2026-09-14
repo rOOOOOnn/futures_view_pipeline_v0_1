@@ -17,9 +17,10 @@
 - 期权结构和跨品种套利不得机械拆成单边观点。
 - 碳酸锂必须 sector=碳酸锂；多晶硅必须 sector=多晶硅。
 - evidence 必须忠实支持商品与未来方向，不得包含你的分类推理。
+- supply、demand、inventory、core_logic、medium_outlook 分别填写来源明确提到的供给、需求、库存、核心逻辑和中期/中长期展望。来源未提到的字段必须填空字符串，不得用常识补写；只有明确的中期或中长期判断才写入 medium_outlook。
 - view_date 必须为 {{TARGET_DATE}}；若当天文章转载的是旧观点则不输出。
 - source_url 必须是真实具体文章 URL，不得猜测；可靠转载 confidence 通常不高于“中”。
 
 只返回一个合法 JSON object，不要 Markdown、解释、搜索过程、missing 或 search_audit：
-{"target_date":"{{TARGET_DATE}}","company":"东证期货","records":[{"company":"东证期货","sector":"板块","commodity":"品种","view":"五档观点","view_date":"{{TARGET_DATE}}","source_date":"YYYY-MM-DD","source_type":"微信公众号/官方网站/财经网站转载/公众号转载","source_name":"真实来源名","source_title":"真实标题","source_url":"真实http(s) URL","evidence":"证据","confidence":"高/中/低"}]}
+{"target_date":"{{TARGET_DATE}}","company":"东证期货","records":[{"company":"东证期货","sector":"板块","commodity":"品种","view":"五档观点","view_date":"{{TARGET_DATE}}","source_date":"YYYY-MM-DD","source_type":"微信公众号/官方网站/财经网站转载/公众号转载","source_name":"真实来源名","source_title":"真实标题","source_url":"真实http(s) URL","evidence":"证据","confidence":"高/中/低","supply":"供给信息或空字符串","demand":"需求信息或空字符串","inventory":"库存信息或空字符串","core_logic":"核心逻辑或空字符串","medium_outlook":"明确中期展望或空字符串"}]}
 若没有可靠记录，records=[]。score 由后续 Python 固定映射为 -2 至 2。

@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,13 +11,23 @@ from futures_view.finalize import (
     judgement,
     prior_company_score,
 )
-from futures_view.build_prompts import compact_gtja_documents, extract_citicsf_coverage_candidates
+from futures_view.build_prompts import (
+    compact_citicsf_documents,
+    compact_gfqh_documents,
+    compact_gtja_documents,
+    extract_citicsf_coverage_candidates,
+    prefer_chinese_bilingual_text,
+)
 from futures_view.llm.api_llm import (
     _dzqh_processing_status,
+    _merge_search_meta,
     _needs_dzqh_retry,
+    _parse_dzqh_official_posts,
     _postprocess_records,
     _merge_by_commodity,
     aggregate_call_usage,
+    call_with_model_fallback,
+    configured_models,
     _search_results_evidence,
     citicsf_deterministic_coverage_records,
     enforce_commodity_sectors,
@@ -40,12 +51,50 @@ from futures_view.llm.browser_llm import (
 from futures_view.ocr import normalize_rapidocr_result
 from futures_view.scrapers.gfqh import GFQHScraper
 from futures_view.scrapers.citicsf import CITICSFScraper
+from futures_view.scrapers.dzqh import extract_pdf_outlook_digest, parse_official_posts
 from futures_view.pipeline import crawl_result_status
 from futures_view.title_rules import directional_view_override, title_only_rejection
 from futures_view.utils import normalize_target_date
+from futures_view.view_database import (
+    connect_database,
+    ingest_records,
+    load_current_outlook,
+    structured_fields,
+)
 
 
 class CoreTests(unittest.TestCase):
+    def test_model_fallback_only_switches_on_http_402(self):
+        class QuotaError(Exception):
+            status_code = 402
+
+        calls = []
+
+        def operation(model):
+            calls.append(model)
+            if model == "hy3":
+                raise QuotaError("quota")
+            return "ok"
+
+        value, model, attempts = call_with_model_fallback({
+            "model": "hy3",
+            "model_fallbacks": ["deepseek-v4-flash", "deepseek-v4-pro"],
+        }, operation)
+        self.assertEqual((value, model), ("ok", "deepseek-v4-flash"))
+        self.assertEqual(calls, ["hy3", "deepseek-v4-flash"])
+        self.assertEqual([item["model"] for item in attempts], ["hy3"])
+        self.assertEqual(configured_models({
+            "model": "hy3", "model_fallbacks": ["hy3", "deepseek-v4-flash"],
+        }), ["hy3", "deepseek-v4-flash"])
+
+        class OtherError(Exception):
+            status_code = 429
+
+        with self.assertRaises(OtherError):
+            call_with_model_fallback({
+                "model": "hy3", "model_fallbacks": ["deepseek-v4-flash"],
+            }, lambda _: (_ for _ in ()).throw(OtherError("rate limit")))
+
     def test_history_carry_skips_missing_previous_day_and_uses_latest_sector_score(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -106,6 +155,71 @@ class CoreTests(unittest.TestCase):
             "ok_api", None,
         ))
 
+    def test_dzqh_official_posts_are_filtered_by_exact_date(self):
+        posts = [{
+            "date": "2026-09-08T10:00:08",
+            "link": "https://www.orientfutures.com.sg/research/report-20260908/",
+            "title": {"rendered": "东证期货 日度报告 综合晨报 20260908"},
+            "content": {"rendered": "<p>能源化工（原油）</p><p>油价短期偏强。</p>"},
+        }, {
+            "date": "2026-09-09T09:25:46",
+            "link": "https://www.orientfutures.com.sg/research/report-20260909/",
+            "title": {"rendered": "东证期货 日度报告 综合晨报 20260909"},
+            "content": {"rendered": "<p>次日报告</p>"},
+        }]
+        results = _parse_dzqh_official_posts(posts, "2026-09-08")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["site"], "东证期货新加坡官网")
+        self.assertIn("油价短期偏强", results[0]["snippet"])
+
+    def test_dzqh_crawler_extracts_official_pdf_link_for_exact_date(self):
+        posts = [{
+            "id": 37939,
+            "date": "2026-09-11T09:30:00",
+            "link": "https://www.orientfutures.com.sg/research/report/",
+            "title": {"rendered": "东证期货 日度报告 综合晨报 20260911"},
+            "content": {"rendered": (
+                '<a href="https://www.orientfutures.com.sg/wp-content/uploads/'
+                '2026/09/东证期货_综合晨报_20260911.pdf">下载PDF</a>'
+            )},
+            "excerpt": {"rendered": "<p>油价短期偏强。</p>"},
+        }]
+        reports = parse_official_posts(posts, "2026-09-11")
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0]["post_id"], "37939")
+        self.assertIn("%E4%B8%9C%E8%AF%81", reports[0]["pdf_url"])
+        self.assertEqual(reports[0]["excerpt"], "油价短期偏强。")
+        self.assertEqual(parse_official_posts(posts, "2026-09-10"), [])
+
+    def test_dzqh_pdf_digest_keeps_only_commodity_outlooks(self):
+        text = """目录
+2.1、黑色金属（铁矿石）................ 6
+2.2、能源化工（原油）................ 7
+2.1、黑色金属（铁矿石）
+新闻和长篇点评不应保留。
+总结与展望：短期矿价震荡偏弱。
+2.2、能源化工（原油）
+更多长篇资讯不应保留。
+总结与展望：短期油价震荡偏强。
+2.3、农产品（玉米）
+供需信息。
+总结与展望：玉米区间运行。"""
+        digest = extract_pdf_outlook_digest(text)
+        self.assertIn("短期矿价震荡偏弱", digest)
+        self.assertIn("短期油价震荡偏强", digest)
+        self.assertIn("玉米区间运行", digest)
+        self.assertNotIn("长篇点评", digest)
+        self.assertNotIn("................", digest)
+
+    def test_search_meta_prefers_first_source_and_deduplicates_urls(self):
+        official = {"search_results": [{"url": "https://example.com/1", "name": "官网"}]}
+        search = {"search_results": [
+            {"url": "https://example.com/1", "name": "重复"},
+            {"url": "https://example.com/2", "name": "补充"},
+        ]}
+        merged = _merge_search_meta(official, search)
+        self.assertEqual([item["name"] for item in merged["search_results"]], ["官网", "补充"])
+
     def test_gtja_prompt_compaction_removes_duplicate_title_text(self):
         defaults, documents = compact_gtja_documents([{
             "source_date": "2026-08-26", "source_title": "锌：偏强震荡",
@@ -118,6 +232,47 @@ class CoreTests(unittest.TestCase):
         }])
         self.assertEqual(defaults["source_content_kind"], "title_only")
 
+    def test_gfqh_prompt_compaction_keeps_only_scored_model_fields(self):
+        defaults, documents = compact_gfqh_documents([{
+            "source_date": "2026-09-11", "source_title": "广发期货日评20260911",
+            "source_url": "https://example.com/gf", "source_text": json.dumps({
+                "format": "gfqh_daily_review_table_v1",
+                "rows": [{
+                    "row": 1, "sector_hint": "有色金属", "commodity": "铜",
+                    "commodity_ocr": "铜", "contract": "CU2610",
+                    "comment": "库存下降", "advice": "逢低做多", "scored": True,
+                }, {
+                    "row": 2, "commodity": "股指", "comment": "上涨",
+                    "advice": "", "scored": False,
+                }],
+            }, ensure_ascii=False),
+        }])
+        rows = json.loads(documents[0]["source_text"])["rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(set(rows[0]), {"sector_hint", "commodity", "comment", "advice"})
+        self.assertEqual(defaults["source_type"], "官方网站PNG")
+
+    def test_citic_prompt_compaction_prefers_complete_chinese_copy(self):
+        english = "Copper supply remains tight. " * 80
+        chinese = "2025年以来铜矿供应偏紧，冶炼产能增长较快。" * 30
+        combined = english + "\n\n" + chinese
+        self.assertEqual(prefer_chinese_bilingual_text(combined), chinese)
+        self.assertEqual(prefer_chinese_bilingual_text("铜价震荡偏强。"), "铜价震荡偏强。")
+        defaults, documents, candidates = compact_citicsf_documents([{
+            "company_hint": "中信期货", "source_date": "2026-09-11",
+            "source_type": "官方网站", "source_name": "中信期货机构服务平台",
+            "source_title": "铜日报", "source_url": "https://example.com/citic",
+            "source_text": combined + "\n铜：震荡偏强",
+            "document_id": "drop-me", "crawl_status": "ok", "notes": "drop-me",
+        }])
+        self.assertEqual(set(documents[0]), {
+            "source_date", "source_title", "source_url", "source_text",
+        })
+        self.assertEqual(defaults["source_name"], "中信期货机构服务平台")
+        self.assertEqual(set(candidates[0]), {
+            "commodity_hint", "sector_hint", "statement", "source_title",
+        })
+
     def test_api_schema_requires_strict_records(self):
         schema = response_schema("2026-08-26", "国泰海通期货")
         self.assertFalse(schema["additionalProperties"])
@@ -127,6 +282,42 @@ class CoreTests(unittest.TestCase):
         self.assertIn("粕类", item["properties"]["commodity"]["enum"])
         self.assertIn("综合", item["properties"]["commodity"]["enum"])
         self.assertIn("[^/\\s]+", item["properties"]["source_url"]["pattern"])
+        self.assertIn("supply", item["required"])
+        self.assertIn("medium_outlook", item["required"])
+
+    def test_current_view_updates_fields_independently_and_keeps_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "views.sqlite3"
+            common = {
+                "company": "广发期货", "sector": "黑色系", "commodity": "铁矿石",
+                "view": "看多", "score": 1.0, "source_date": "2026-09-10",
+                "source_type": "官方网站", "source_name": "广发期货",
+                "source_title": "日报", "source_url": "https://example.com/report",
+                "confidence": "高",
+            }
+            first = {**common, "view_date": "2026-09-10", "evidence": "发运回升；港口库存去化",
+                     "supply": "澳巴发运回升", "demand": "", "inventory": "港口库存去化",
+                     "core_logic": "供应回升但库存去化", "medium_outlook": ""}
+            second = {**common, "view_date": "2026-09-11", "source_date": "2026-09-11",
+                      "evidence": "铁水开始回落", "supply": "", "demand": "铁水开始回落",
+                      "inventory": "", "core_logic": "需求边际走弱", "medium_outlook": "震荡"}
+            with closing(connect_database(database)) as connection:
+                ingest_records(connection, [first, second, second])
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM view_history").fetchone()[0], 2)
+            view = load_current_outlook(database, "2026-09-11")[0]
+            self.assertEqual(view["supply"], "澳巴发运回升")
+            self.assertEqual(view["demand"], "铁水开始回落")
+            self.assertEqual(view["inventory"], "港口库存去化")
+            self.assertEqual(view["medium_outlook"], "震荡")
+            self.assertEqual(view["last_update"], "2026-09-11")
+
+    def test_legacy_field_inference_does_not_cross_labelled_commodities(self):
+        fields = structured_fields({
+            "commodity": "硅铁",
+            "evidence": "锰硅：原料成本与库存变动支撑；硅铁供应仍有回升预期",
+        })
+        self.assertEqual(fields["supply"], "硅铁供应仍有回升预期")
+        self.assertEqual(fields["inventory"], "")
 
     def test_source_url_repair_uses_crawler_document(self):
         documents = [{
@@ -167,6 +358,9 @@ class CoreTests(unittest.TestCase):
     def test_neutral_requires_explicit_neutral_evidence(self):
         self.assertIsNone(view_evidence_rejection({"view": "中性", "evidence": "价格区间震荡"}))
         self.assertIsNone(view_evidence_rejection({"view": "中性", "evidence": "钯：窄幅交投"}))
+        self.assertIsNone(view_evidence_rejection({
+            "view": "中性", "evidence": "短期主力合约或在13.8-15万元/吨运行",
+        }))
         self.assertIsNotNone(view_evidence_rejection({
             "view": "中性", "evidence": "期货计价升水，但现货仍承压",
         }))
@@ -187,6 +381,7 @@ class CoreTests(unittest.TestCase):
             "中期维持震荡偏弱，等待逢高做空机会",
             "需求疲软，弱势难改，盘面趋弱；暂观望",
             "现货小幅下调，价格延续调整；短期观望",
+            "短期矿价高位有所调整。预计矿价下方空间可控",
         ]
         self.assertTrue(all(directional_view_override(text) == "看多" for text in bullish))
         self.assertTrue(all(directional_view_override(text) == "看空" for text in bearish))
@@ -386,6 +581,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(canonical_commodity("黑色系综合"), "综合")
         self.assertEqual(canonical_commodity("有色金属板块"), "综合")
         self.assertEqual(canonical_commodity("集运指数（欧线）"), "集运欧线")
+        self.assertEqual(canonical_commodity("集装箱运价"), "集运欧线")
         self.assertEqual(canonical_commodity("郑糖"), "白糖")
         self.assertEqual(canonical_commodity("沪铜"), "铜")
         self.assertEqual(canonical_commodity("豆二"), "豆二")

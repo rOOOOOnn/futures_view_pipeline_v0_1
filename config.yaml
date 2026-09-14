@@ -25,11 +25,12 @@ sources:
     mode: official_title_only
     start_url: https://www.gtjaqh.com/pc/report?catType=&page=1
 
-  dzqh_public:
+  dzqh:
     enabled: true
     company: 东证期货
-    mode: llm_public_search
-    # 东证不爬受限官网：由联网 LLM 按专用 Prompt 检索公开报道/可靠转载。
+    mode: official_wordpress_pdf
+    start_url: https://www.orientfutures.com.sg/zh/research/
+    # 官网 WordPress API 定位当天晨报，保留网页摘要与官方 PDF 各品种“总结与展望”。
 
 llm_web:
   enabled: true
@@ -117,15 +118,19 @@ llm_api:
   # 普通分类按API Key实际开通地域选择：
   # 广州(中国大陆): https://tokenhub.tencentmaas.com/v1
   # 新加坡(全球):   https://tokenhub-intl.tencentmaas.com/v1
-  # 两站Key不互通；此处保留当前已验证的新加坡配置。
-  base_url: "https://tokenhub-intl.tencentmaas.com/v1"
-  # 联网搜索当前仅支持广州，因此东证发现阶段固定使用广州入口。
+  # 两站Key不互通；本项目使用广州站，与启用管理页面的广州免费额度一致。
+  base_url: "https://tokenhub.tencentmaas.com/v1"
+  # 东证优先走官网 WordPress API + 官方 PDF；只有官网失败时才使用广州联网搜索兜底。
   search_base_url: "https://tokenhub.tencentmaas.com/v1"
   search_api_key_env: "TENCENT_TOKENHUB_SEARCH_API_KEY"
   search_api_key_file: "secrets/tokenhub_search_api_key.txt"
   api_key_env: "TENCENT_TOKENHUB_API_KEY"
   api_key_file: "secrets/tokenhub_api_key.txt"
   model: "hy3"
+  # 仅当当前模型返回 HTTP 402（额度耗尽/服务未开通）时按顺序切换。
+  model_fallbacks:
+    - "deepseek-v4-flash"
+    - "deepseek-v4-pro"
   # 20-40条结构化观点通常只需约4k-7k；限制异常重复输出和无谓费用。
   max_output_tokens: 10000
   reasoning: false

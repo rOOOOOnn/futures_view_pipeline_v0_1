@@ -5,7 +5,7 @@ import json
 import math
 import re
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +15,7 @@ from openpyxl.chart.label import DataLabelList
 from openpyxl.chart.shapes import GraphicalProperties
 from openpyxl.comments import Comment
 from openpyxl.formatting.rule import ColorScaleRule
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 from .constants import (
     BEAR_THRESHOLD,
@@ -38,12 +38,13 @@ from .source_validation import (
     repair_source_urls,
     view_evidence_rejection,
 )
+from .view_database import FIELD_NAMES, load_current_outlook, sync_output_history
 
 REQUIRED_FIELDS = {
     "company", "sector", "commodity", "view", "view_date", "source_date",
     "source_type", "source_name", "source_title", "source_url", "evidence", "confidence",
 }
-SOURCE_PRIORITY = {"官方PDF": 6, "官方网站PDF": 6, "官方网站": 6, "微信公众号": 5,
+SOURCE_PRIORITY = {"官方PDF": 6, "官方网站PDF": 6, "官方网站PDF摘要": 6, "官方网站": 6, "微信公众号": 5,
                    "财经网站转载": 3, "公开转载": 2, "公众号转载": 2, "官方网站标题": 1}
 CONFIDENCE_PRIORITY = {"高": 3, "中": 2, "低": 1}
 
@@ -123,6 +124,8 @@ def validate_company_file(path: Path, key: str, target_date: str,
             rejected.append(f"第 {index} 条：{'；'.join(reasons)}")
             continue
         record = {field: raw[field] for field in REQUIRED_FIELDS}
+        for field in FIELD_NAMES:
+            record[field] = str(raw.get(field) or "").strip()
         record["score"] = VIEW_SCORE[record["view"]]
         candidates.append(record)
 
@@ -479,6 +482,99 @@ def add_detail_sheet(wb: Workbook, company_data: dict[str, dict[str, Any]]):
     ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
 
 
+def _age_fill(age_days: int | None) -> PatternFill:
+    if age_days is None or age_days <= 3:
+        return PatternFill(fill_type=None)
+    if age_days <= 7:
+        return PatternFill("solid", fgColor=YELLOW)
+    if age_days <= 14:
+        return PatternFill("solid", fgColor="FCE5CD")
+    return PatternFill("solid", fgColor=RED)
+
+
+def add_midterm_sheet(wb: Workbook, target_date: str,
+                      current_views: list[dict[str, Any]]) -> None:
+    """Create the commodity-level current snapshot requested for medium-term review."""
+    ws = wb.create_sheet("中期展望", 1)
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = "D00000"
+    red = "D00000"
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws.merge_cells("A1:A2")
+    ws.merge_cells("B1:E1")
+    ws.merge_cells("F1:F2")
+    ws.merge_cells("G1:J1")
+    ws["A1"] = "品种"
+    ws["B1"] = "核心变量"
+    ws["F1"] = "中期展望"
+    ws["G1"] = "时效与来源"
+    for column, value in enumerate(("供给", "需求", "库存", "核心逻辑"), start=2):
+        ws.cell(2, column, value)
+    for column, value in enumerate(("方向", "更新时间", "数据年龄", "观点来源"), start=7):
+        ws.cell(2, column, value)
+    for row in ws.iter_rows(min_row=1, max_row=2, min_col=1, max_col=10):
+        for cell in row:
+            cell.fill = PatternFill("solid", fgColor=red)
+            cell.font = Font(name=FONT, bold=True, color=WHITE, size=12)
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = border
+    ws.row_dimensions[1].height = 25
+    ws.row_dimensions[2].height = 25
+
+    sector_order = {sector: index for index, sector in enumerate(SECTORS)}
+    ordered = sorted(current_views, key=lambda item: (
+        sector_order.get(str(item.get("sector")), 999), str(item.get("commodity")),
+    ))
+    field_columns = {
+        "supply": 2, "demand": 3, "inventory": 4,
+        "core_logic": 5, "medium_outlook": 6,
+    }
+    for row_number, item in enumerate(ordered, start=3):
+        ws.cell(row_number, 1, item.get("commodity"))
+        for field_name, column in field_columns.items():
+            cell = ws.cell(row_number, column, item.get(field_name) or "")
+            source = (item.get("field_sources") or {}).get(field_name)
+            if source:
+                source_date = str(source.get("view_date") or "")
+                age = ((date.fromisoformat(target_date) - date.fromisoformat(source_date)).days
+                       if source_date else None)
+                cell.fill = _age_fill(age)
+                cell.comment = Comment(
+                    f"来源机构：{source.get('company', '')}\n"
+                    f"观点日期：{source_date}\n"
+                    f"来源标题：{source.get('source_title', '')}\n"
+                    f"来源URL：{source.get('source_url', '')}",
+                    "Codex",
+                )
+        score = item.get("score")
+        direction = item.get("direction") or "无数据"
+        ws.cell(row_number, 7, f"{direction} ({score:+.1f})" if score is not None else direction)
+        ws.cell(row_number, 8, item.get("last_update"))
+        ws.cell(row_number, 9, item.get("age_days"))
+        ws.cell(row_number, 10, item.get("sources"))
+        ws.cell(row_number, 9).fill = _age_fill(item.get("age_days"))
+        if score is not None:
+            ws.cell(row_number, 7).fill = PatternFill(
+                "solid", fgColor=GREEN if score >= 0.5 else RED if score <= -0.5 else YELLOW
+            )
+        for cell in ws[row_number][:10]:
+            cell.font = Font(name=FONT, color=BLACK, size=10)
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            cell.border = border
+        ws.row_dimensions[row_number].height = 72
+
+    widths = {"A": 14, "B": 34, "C": 34, "D": 34, "E": 48,
+              "F": 34, "G": 16, "H": 14, "I": 12, "J": 30}
+    for column, width in widths.items():
+        ws.column_dimensions[column].width = width
+    end = max(ws.max_row, 2)
+    ws.freeze_panes = "B3"
+    ws.auto_filter.ref = f"A2:J{end}"
+    ws.sheet_view.zoomScale = 80
+
+
 def add_quality_sheet(wb: Workbook, company_data: dict[str, dict[str, Any]]):
     ws=wb.create_sheet("运行与数据质量"); ws.sheet_view.showGridLines=False
     headers=["期货公司","处理状态","采集状态","有效观点数","拒绝记录数","说明"]
@@ -524,6 +620,7 @@ def ensure_excel_output_available(target_date: str, output_root: str | Path = "o
 def main() -> None:
     parser=argparse.ArgumentParser(description="校验四家公司 JSON，计算评分并输出日期 Excel")
     parser.add_argument("--date"); parser.add_argument("--input-root",default="data/llm_output"); parser.add_argument("--output-root",default="output")
+    parser.add_argument("--database", default="data/view_database.sqlite3")
     args=parser.parse_args(); target_date=args.date or shanghai_today(); stamp=target_date.replace("-","")
     input_dir=Path(args.input_root)/stamp; output_root=Path(args.output_root); output_dir=output_root/stamp; output_dir.mkdir(parents=True,exist_ok=True)
     try:
@@ -537,13 +634,19 @@ def main() -> None:
     for key in COMPANY_KEYS:
         data=validate_company_file(input_dir/f"{key}.json",key,target_date,documents); company_data[key]=data
         final_obj={k:v for k,v in data.items() if k not in {"rejected","input_record_count"}}
-        final_obj["schema_version"]="1.0"; save_json(output_dir/f"{key}.json",final_obj)
+        final_obj["schema_version"]="2.0"; save_json(output_dir/f"{key}.json",final_obj)
     rows=build_matrix(company_data,output_root,stamp)
-    wb=Workbook(); add_summary_sheet(wb,target_date,rows,company_data); add_detail_sheet(wb,company_data); add_quality_sheet(wb,company_data)
+    sync_output_history(output_root, args.database, stamp)
+    current_views = load_current_outlook(args.database, target_date)
+    save_json(output_dir/f"current_view_{stamp}.json", {
+        "as_of_date": target_date, "views": current_views,
+    })
+    wb=Workbook(); add_summary_sheet(wb,target_date,rows,company_data); add_midterm_sheet(wb,target_date,current_views); add_detail_sheet(wb,company_data); add_quality_sheet(wb,company_data)
     excel=requested_excel
     wb.save(excel)
     save_json(output_dir/f"summary_{stamp}.json",{
         "target_date":target_date,"rows":rows,"excel_file":str(excel),
+        "database_file":str(args.database),"current_view_count":len(current_views),
         "generated_at":datetime.now().isoformat(timespec="seconds"),
     })
     print(excel)

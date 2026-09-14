@@ -7,8 +7,9 @@ from .utils import load_yaml, save_json, shanghai_today
 from .scrapers.gfqh import GFQHScraper
 from .scrapers.citicsf import CITICSFScraper
 from .scrapers.gtjaqh import GTJAQHScraper
+from .scrapers.dzqh import DZQHScraper
 
-SCRAPERS={'gfqh':GFQHScraper,'citicsf':CITICSFScraper,'gtjaqh':GTJAQHScraper}
+SCRAPERS={'gfqh':GFQHScraper,'citicsf':CITICSFScraper,'gtjaqh':GTJAQHScraper,'dzqh':DZQHScraper}
 
 
 def crawl_result_status(items: list[dict]) -> dict:

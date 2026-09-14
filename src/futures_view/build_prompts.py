@@ -71,6 +71,79 @@ def compact_gtja_documents(documents: list[dict]) -> tuple[dict, list[dict]]:
     return defaults, compact
 
 
+def compact_gfqh_documents(documents: list[dict]) -> tuple[dict, list[dict]]:
+    """Drop OCR audit fields after Python has already normalized every row."""
+    defaults = {
+        "source_type": "官方网站PNG",
+        "source_name": "广发期货研究资讯",
+        "source_content_kind": "image_ocr",
+    }
+    compact = []
+    for doc in documents:
+        try:
+            payload = json.loads(str(doc.get("source_text") or ""))
+        except (json.JSONDecodeError, TypeError):
+            payload = {"rows": []}
+        rows = [
+            {
+                "sector_hint": row.get("sector_hint"),
+                "commodity": row.get("commodity"),
+                "comment": row.get("comment"),
+                "advice": row.get("advice"),
+            }
+            for row in payload.get("rows", [])
+            if row.get("scored")
+        ]
+        compact.append({
+            "source_date": doc.get("source_date"),
+            "source_title": doc.get("source_title"),
+            "source_url": doc.get("source_url"),
+            "source_text": json.dumps({
+                "format": "gfqh_daily_review_table_v1",
+                "rows": rows,
+            }, ensure_ascii=False, separators=(",", ":")),
+        })
+    return defaults, compact
+
+
+def prefer_chinese_bilingual_text(text: str) -> str:
+    """Remove a long English prefix when a complete Chinese version follows it."""
+    value = str(text or "")
+    han_positions = [index for index, char in enumerate(value) if "\u4e00" <= char <= "\u9fff"]
+    if len(han_positions) < 300:
+        return value
+    first_han = han_positions[0]
+    prefix = value[:first_han]
+    if first_han < len(value) // 2 or len(re.findall(r"[A-Za-z]", prefix)) < 500:
+        return value
+    paragraph = value.rfind("\n\n", 0, first_han)
+    start = paragraph + 2 if paragraph >= 0 else first_han
+    chinese = value[start:].strip()
+    return chinese if len(chinese) >= 500 else value
+
+
+def compact_citicsf_documents(documents: list[dict]) -> tuple[dict, list[dict], list[dict]]:
+    """Keep source identity once and remove duplicated bilingual/report metadata."""
+    defaults = {
+        "source_type": "官方网站",
+        "source_name": "中信期货机构服务平台",
+        "source_content_kind": "full_text",
+    }
+    compact = [{
+        "source_date": doc.get("source_date"),
+        "source_title": doc.get("source_title"),
+        "source_url": doc.get("source_url"),
+        "source_text": prefer_chinese_bilingual_text(str(doc.get("source_text") or "")),
+    } for doc in documents]
+    candidates = [{
+        "commodity_hint": item.get("commodity_hint"),
+        "sector_hint": item.get("sector_hint"),
+        "statement": item.get("statement"),
+        "source_title": item.get("source_title"),
+    } for item in extract_citicsf_coverage_candidates(documents)]
+    return defaults, compact, candidates
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="按公司生成四份 LLM Prompt")
     parser.add_argument("--date")
@@ -95,26 +168,42 @@ def main() -> None:
 
     for key in selected:
         company = COMPANY_KEYS[key]
-        if key == "dzqh":
+        company_docs = [
+            d for d in documents
+            if d.get("company_hint") == company and d.get("source_date") == target_date
+        ]
+        crawl = crawl_status.get(key, {"status": "unknown"})
+        fallback_search = (
+            key == "dzqh" and not company_docs
+            and crawl.get("status") not in {"no_source_reports", "no_reports"}
+        )
+        deterministic_only = key == "gtjaqh" and bool(company_docs)
+        if deterministic_only:
+            body = "国泰海通期货当天公开标题由 Python 确定性规则本地分类，不调用模型 API。"
+            parts = [(body, len(company_docs))]
+        elif fallback_search:
             body = dzqh_rules.replace("{{TARGET_DATE}}", target_date)
             parts = [(body, 0)]
         else:
-            company_docs = [
-                d for d in documents
-                if d.get("company_hint") == company and d.get("source_date") == target_date
-            ]
             doc_groups = [company_docs]
             parts = []
             for group in doc_groups:
                 payload = {"target_date": target_date, "company": company}
-                if key == "gtjaqh":
+                if key == "gfqh":
+                    defaults, compact_docs = compact_gfqh_documents(group)
+                    payload["source_defaults"] = defaults
+                    payload["source_documents"] = compact_docs
+                elif key == "citicsf":
+                    defaults, compact_docs, candidates = compact_citicsf_documents(group)
+                    payload["source_defaults"] = defaults
+                    payload["source_documents"] = compact_docs
+                    payload["coverage_candidates"] = candidates
+                elif key == "gtjaqh":
                     defaults, compact_docs = compact_gtja_documents(group)
                     payload["source_defaults"] = defaults
                     payload["source_documents"] = compact_docs
                 else:
                     payload["source_documents"] = group
-                    if key == "citicsf":
-                        payload["coverage_candidates"] = extract_citicsf_coverage_candidates(group)
                 body = common_rules + "\n\nINPUT:\n" + json.dumps(payload, ensure_ascii=False, indent=2)
                 parts.append((body, len(group)))
         part_count = len(parts)
@@ -129,8 +218,9 @@ def main() -> None:
                 "source_count": source_count,
                 "part_index": part_index,
                 "part_count": part_count,
-                "crawl": crawl_status.get(
-                    key, {"status": "llm_public_search" if key == "dzqh" else "unknown"}),
+                "crawl": crawl,
+                "fallback_search": fallback_search,
+                "deterministic_only": deterministic_only,
             })
 
     (out_dir / "manifest.json").write_text(

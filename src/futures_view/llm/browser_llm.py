@@ -556,6 +556,9 @@ async def run(args) -> None:
         entries = manifest_obj.get("prompts", [])
         if args.company != "all":
             entries = [entry for entry in entries if entry.get("key") == args.company]
+        normalized_path = Path(f"data/normalized/{stamp}/documents.json")
+        normalized = json.loads(normalized_path.read_text(encoding="utf-8"))
+        documents = normalized.get("documents", [])
         out_dir = Path(f"data/llm_output/{stamp}")
         out_dir.mkdir(parents=True, exist_ok=True)
         parts_dir = out_dir / "parts"
@@ -592,6 +595,20 @@ async def run(args) -> None:
             prompt_text = prompt_path.read_text(encoding="utf-8")
             prompt_sha256 = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
             part_result_path = parts_dir / f"{part_id}.json"
+            if entry.get("deterministic_only"):
+                # Local import avoids a module-level cycle: api_llm reuses this
+                # module's response parser.
+                from .api_llm import gtja_python_records
+                records, rejected = gtja_python_records(documents, target_date)
+                aggregate["records"].extend(records)
+                aggregate["parts"].append({
+                    "part_index": part_index, "status": "ok", "records": len(records),
+                    "prompt_file": str(prompt_path), "prompt_sha256": prompt_sha256,
+                    "deterministic_only": True, "rejected": len(rejected),
+                })
+                emit(f"[{index}/{len(entries)}] {label}：Python本地分类完成，"
+                     f"{len(records)} 条，不调用元宝", log_path)
+                continue
             if llm.get("resume_successful_parts", True) and part_result_path.exists():
                 try:
                     existing = json.loads(part_result_path.read_text(encoding="utf-8"))
@@ -655,7 +672,7 @@ async def run(args) -> None:
                     })
                     emit(f"[{index}/{len(entries)}] {label}：恢复失败；仅恢复模式已阻止重新发送", log_path)
                     continue
-            if key != "dzqh" and entry.get("source_count", 0) == 0:
+            if entry.get("source_count", 0) == 0 and not entry.get("fallback_search"):
                 status = "crawl_error" if crawl.get("status") == "error" else "no_source_reports"
                 aggregate["empty_status"] = status
                 aggregate["parts"].append({"part_index": part_index, "status": status, "records": 0})

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from ..constants import COMPANY_KEYS, CONFIDENCE_LEVELS, SECTORS, VIEWS
 from ..build_prompts import extract_citicsf_coverage_candidates
@@ -34,6 +37,7 @@ REQUIRED_RECORD_FIELDS = {
     "company", "sector", "commodity", "view", "view_date", "source_date",
     "source_type", "source_name", "source_title", "source_url", "evidence", "confidence",
 }
+STRUCTURED_VIEW_FIELDS = ("supply", "demand", "inventory", "core_logic", "medium_outlook")
 
 
 def response_schema(target_date: str, company: str) -> dict:
@@ -54,6 +58,11 @@ def response_schema(target_date: str, company: str) -> dict:
         "source_url": {"type": "string", "pattern": r"^https?://[^/\s]+/.+"},
         "evidence": string,
         "confidence": {"type": "string", "enum": sorted(CONFIDENCE_LEVELS)},
+        "supply": {"type": "string"},
+        "demand": {"type": "string"},
+        "inventory": {"type": "string"},
+        "core_logic": {"type": "string"},
+        "medium_outlook": {"type": "string"},
     }
     return {
         "type": "object",
@@ -126,11 +135,45 @@ def enforce_commodity_sectors(records: list[dict]) -> tuple[list[dict], list[dic
     return accepted, rejected
 
 
+def configured_models(api: dict, preferred_model: str | None = None) -> list[str]:
+    models = [str(api.get("model", "hy3")), *[
+        str(model) for model in api.get("model_fallbacks", []) if str(model).strip()
+    ]]
+    unique = list(dict.fromkeys(models))
+    if preferred_model in unique:
+        return unique[unique.index(preferred_model):]
+    return unique
+
+
+def is_model_quota_error(exc: Exception) -> bool:
+    """Only HTTP 402 is eligible for automatic model switching."""
+    return getattr(exc, "status_code", None) == 402
+
+
+def call_with_model_fallback(api: dict, operation, preferred_model: str | None = None):
+    attempts = []
+    models = configured_models(api, preferred_model)
+    for index, model in enumerate(models):
+        try:
+            return operation(model), model, attempts
+        except Exception as exc:
+            if not is_model_quota_error(exc) or index == len(models) - 1:
+                raise
+            attempts.append({
+                "model": model,
+                "status_code": 402,
+                "error": "模型额度耗尽或服务未开通，已自动切换",
+            })
+            print(f"[TokenHub] {model} 返回402，自动切换到 {models[index + 1]}…", flush=True)
+    raise RuntimeError("没有可用的模型候选")
+
+
 def _call_model(client, api: dict, target_date: str, company: str,
-                prompt: str, extra_body: dict, max_tokens: int | None = None
+                prompt: str, extra_body: dict, max_tokens: int | None = None,
+                model: str | None = None
                 ) -> tuple[dict, str, dict]:
     response = client.chat.completions.create(
-        model=str(api.get("model", "hy3")),
+        model=model or str(api.get("model", "hy3")),
         messages=[{"role": "user", "content": prompt}],
         max_tokens=max_tokens or int(api.get("max_output_tokens", 20000)),
         response_format={
@@ -149,11 +192,12 @@ def _call_model(client, api: dict, target_date: str, company: str,
     return result, raw, usage
 
 
-def _call_text_model(client, api: dict, prompt: str, extra_body: dict
+def _call_text_model(client, api: dict, prompt: str, extra_body: dict,
+                     model: str | None = None
                      ) -> tuple[str, dict, dict]:
     """Run discovery without JSON schema so TokenHub can actually use web search."""
     response = client.chat.completions.create(
-        model=str(api.get("model", "hy3")),
+        model=model or str(api.get("model", "hy3")),
         messages=[{"role": "user", "content": prompt}],
         max_tokens=int(api.get("max_output_tokens", 20000)),
         extra_body=extra_body,
@@ -183,6 +227,66 @@ def _search_results_evidence(search_meta: dict) -> str:
         if item.get("url") and (item.get("name") or item.get("snippet"))
     ]
     return json.dumps(compact, ensure_ascii=False, indent=2)
+
+
+def _plain_html(value: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", html.unescape(str(value or "")))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _parse_dzqh_official_posts(posts: list[dict], target_date: str) -> list[dict]:
+    """Convert matching Orient Futures Singapore posts into search evidence."""
+    stamp = target_date.replace("-", "")
+    results = []
+    for post in posts:
+        title = _plain_html((post.get("title") or {}).get("rendered", ""))
+        published = str(post.get("date") or "")[:10]
+        url = str(post.get("link") or "").strip()
+        if published != target_date or stamp not in title or "东证期货" not in title or not url:
+            continue
+        content = _plain_html((post.get("content") or {}).get("rendered", ""))
+        if not content:
+            content = _plain_html((post.get("excerpt") or {}).get("rendered", ""))
+        results.append({
+            "url": url,
+            "name": title,
+            "snippet": content[:14_000],
+            "site": "东证期货新加坡官网",
+        })
+    return results
+
+
+def fetch_dzqh_official_reports(target_date: str, timeout: int = 20
+                                ) -> tuple[list[dict], str | None]:
+    """Read the official public WordPress API before relying on search recall."""
+    params = urlencode({
+        "search": target_date.replace("-", ""),
+        "per_page": 10,
+        "_fields": "id,date,link,title,content,excerpt",
+    })
+    endpoint = f"https://www.orientfutures.com.sg/wp-json/wp/v2/posts?{params}"
+    try:
+        request = Request(endpoint, headers={"User-Agent": "Mozilla/5.0 futures-view-pipeline"})
+        with urlopen(request, timeout=timeout) as response:
+            posts = json.loads(response.read().decode("utf-8"))
+        if not isinstance(posts, list):
+            return [], "东证官网 API 返回格式异常"
+        return _parse_dzqh_official_posts(posts, target_date), None
+    except Exception as exc:
+        return [], f"{type(exc).__name__}: {exc}"
+
+
+def _merge_search_meta(*metas: dict) -> dict:
+    results = []
+    seen = set()
+    for meta in metas:
+        for item in meta.get("search_results") or []:
+            url = str(item.get("url") or "")
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            results.append(item)
+    return {"search_results": results, "search_info": None}
 
 
 def _needs_dzqh_retry(accepted_records: list[dict], search_meta: dict) -> bool:
@@ -231,6 +335,8 @@ def _postprocess_records(records: list[dict], documents: list[dict], company: st
             })
         else:
             normalized_item = dict(item)
+            for field in STRUCTURED_VIEW_FIELDS:
+                normalized_item.setdefault(field, "")
             if normalized_item.get("view") == "中性":
                 directional = directional_view_override(
                     str(normalized_item.get("evidence") or "")
@@ -449,6 +555,12 @@ def gtja_deterministic_title_records(documents: list[dict], target_date: str) ->
     return records
 
 
+def gtja_python_records(documents: list[dict], target_date: str) -> tuple[list[dict], list[dict]]:
+    records = gtja_deterministic_title_records(documents, target_date)
+    accepted, rejected = _postprocess_records(records, documents, "国泰海通期货")
+    return _merge_by_commodity([], accepted), rejected
+
+
 def _citic_missing_candidates(documents: list[dict], records: list[dict]) -> list[dict]:
     present = {canonical_commodity(str(item.get("commodity", ""))) for item in records}
     return [
@@ -529,7 +641,9 @@ def main() -> None:
     print(f"[TokenHub] 日期={target_date}，任务数={len(entries)}，模型={api.get('model', 'hy3')}")
     for entry in entries:
         prompt = Path(entry["prompt_file"]).read_text(encoding="utf-8")
-        print(f"- {entry['company']}: {len(prompt)} 字，联网搜索={'是' if entry['key'] == 'dzqh' and api.get('dzqh_web_search', True) else '否'}")
+        use_search = bool(entry.get("fallback_search")) and bool(api.get("dzqh_web_search", True))
+        mode = "Python本地分类" if entry.get("deterministic_only") else f"{len(prompt)} 字"
+        print(f"- {entry['company']}: {mode}，联网备用检索={'是' if use_search else '否'}")
     if args.dry_run:
         return
 
@@ -537,6 +651,29 @@ def main() -> None:
         out_dir = Path("data/llm_output") / stamp
         for entry in entries:
             company_path = out_dir / f"{entry['key']}.json"
+            if entry.get("deterministic_only"):
+                accepted, rejected = gtja_python_records(documents, target_date)
+                data = {
+                    "target_date": target_date,
+                    "company": entry["company"],
+                    "records": accepted,
+                    "processing_status": "ok_python_revalidated",
+                    "crawl": entry.get("crawl", {}),
+                    "api": {
+                        "provider": "python", "model": None, "web_search": False,
+                        "usage": aggregate_call_usage([]),
+                        "calls": [{"kind": "gtja_python_title_classifier",
+                                   "candidates": len(accepted), "usage": {}}],
+                    },
+                    "raw_response": "",
+                    "api_rejected": rejected,
+                    "parts": [{"part_index": 1, "status": "ok_python_revalidated",
+                               "records": len(accepted)}],
+                    "errors": [],
+                }
+                save_json(company_path, data)
+                print(f"[重校验] {entry['company']}: 保留={len(accepted)}，拒绝={len(rejected)}，Python本地分类")
+                continue
             data = json.loads(company_path.read_text(encoding="utf-8-sig"))
             candidates = list(data.get("records", []))
             raw_response = str(data.get("raw_response") or "")
@@ -561,7 +698,8 @@ def main() -> None:
                 rejected.extend(deterministic_rejected)
             data["records"] = accepted
             data["api_rejected"] = rejected
-            if entry["key"] == "dzqh":
+            used_web_search = bool((data.get("api") or {}).get("web_search"))
+            if entry["key"] == "dzqh" and used_web_search:
                 search_result_count = sum(
                     len((call.get("search") or {}).get("search_results") or [])
                     for call in (data.get("api") or {}).get("calls", [])
@@ -578,41 +716,101 @@ def main() -> None:
             print(f"[重校验] {entry['company']}: 保留={len(accepted)}，拒绝={len(rejected)}，未调用API")
         return
 
-    env_name = str(api.get("api_key_env", "TENCENT_TOKENHUB_API_KEY"))
-    api_key = os.environ.get(env_name)
-    key_file = Path(str(api.get("api_key_file", "secrets/tokenhub_api_key.txt")))
-    if not api_key and key_file.exists():
-        api_key = key_file.read_text(encoding="utf-8-sig").strip()
-    if not api_key:
-        raise SystemExit(
-            f"缺少 API Key：请设置环境变量 {env_name}，或执行 .\\save_api_key.ps1"
-        )
-    try:
-        from openai import OpenAI
-    except ImportError as exc:
-        raise SystemExit("缺少 openai 依赖，请重新执行 .\\first_setup.ps1") from exc
-
-    client = OpenAI(api_key=api_key, base_url=str(api["base_url"]))
-    search_base_url = str(api.get("search_base_url", api["base_url"]))
-    search_key = os.environ.get(str(api.get("search_api_key_env", "")))
-    search_key_file = Path(str(api.get(
-        "search_api_key_file", "secrets/tokenhub_search_api_key.txt"
-    )))
-    if not search_key and search_key_file.exists():
-        search_key = search_key_file.read_text(encoding="utf-8-sig").strip()
-    if not search_key and search_base_url == str(api["base_url"]):
-        search_key = api_key
-    search_client = (
-        OpenAI(api_key=search_key, base_url=search_base_url) if search_key else None
-    )
     out_dir = Path("data/llm_output") / stamp
     out_dir.mkdir(parents=True, exist_ok=True)
+    requires_api = any(
+        not entry.get("deterministic_only")
+        and (int(entry.get("source_count", 0)) > 0 or entry.get("fallback_search"))
+        for entry in entries
+    )
+    client = search_client = None
+    if requires_api:
+        env_name = str(api.get("api_key_env", "TENCENT_TOKENHUB_API_KEY"))
+        api_key = os.environ.get(env_name)
+        key_file = Path(str(api.get("api_key_file", "secrets/tokenhub_api_key.txt")))
+        if not api_key and key_file.exists():
+            api_key = key_file.read_text(encoding="utf-8-sig").strip()
+        if not api_key:
+            raise SystemExit(
+                f"缺少 API Key：请设置环境变量 {env_name}，或执行 .\\save_api_key.ps1"
+            )
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise SystemExit("缺少 openai 依赖，请重新执行 .\\first_setup.ps1") from exc
+        client = OpenAI(api_key=api_key, base_url=str(api["base_url"]))
+        search_base_url = str(api.get("search_base_url", api["base_url"]))
+        search_key = os.environ.get(str(api.get("search_api_key_env", "")))
+        search_key_file = Path(str(api.get(
+            "search_api_key_file", "secrets/tokenhub_search_api_key.txt"
+        )))
+        if not search_key and search_key_file.exists():
+            search_key = search_key_file.read_text(encoding="utf-8-sig").strip()
+        if not search_key and search_base_url == str(api["base_url"]):
+            search_key = api_key
+        search_client = (
+            OpenAI(api_key=search_key, base_url=search_base_url) if search_key else None
+        )
+    active_model: str | None = None
+    active_search_model: str | None = None
+
+    def routed_model_call(company: str, prompt: str, extra_body: dict,
+                          max_tokens: int | None = None):
+        nonlocal active_model
+        if client is None:
+            raise RuntimeError("模型客户端未初始化")
+        value, used_model, fallbacks = call_with_model_fallback(
+            api,
+            lambda model: _call_model(
+                client, api, target_date, company, prompt, extra_body,
+                max_tokens=max_tokens, model=model,
+            ),
+            preferred_model=active_model,
+        )
+        active_model = used_model
+        return (*value, used_model, fallbacks)
+
+    def routed_text_call(prompt: str, extra_body: dict):
+        nonlocal active_search_model
+        if search_client is None:
+            raise RuntimeError("联网搜索模型客户端未初始化")
+        value, used_model, fallbacks = call_with_model_fallback(
+            api,
+            lambda model: _call_text_model(
+                search_client, api, prompt, extra_body, model=model,
+            ),
+            preferred_model=active_search_model,
+        )
+        active_search_model = used_model
+        return (*value, used_model, fallbacks)
     summaries = []
     for index, entry in enumerate(entries, start=1):
         key, company = entry["key"], entry["company"]
         company_path = out_dir / f"{key}.json"
         source_count = int(entry.get("source_count", 0))
-        if key != "dzqh" and source_count == 0:
+        fallback_search = bool(entry.get("fallback_search"))
+        if entry.get("deterministic_only"):
+            accepted, rejected = gtja_python_records(documents, target_date)
+            usage = aggregate_call_usage([])
+            status = "ok_python"
+            save_json(company_path, {
+                "target_date": target_date, "company": company, "records": accepted,
+                "processing_status": status, "crawl": entry.get("crawl", {}),
+                "api": {
+                    "provider": "python", "model": None, "web_search": False,
+                    "usage": usage,
+                    "calls": [{"kind": "gtja_python_title_classifier",
+                               "candidates": len(accepted), "usage": {}}],
+                },
+                "raw_response": "", "api_rejected": rejected,
+                "parts": [{"part_index": 1, "status": status, "records": len(accepted)}],
+                "errors": [],
+            })
+            (out_dir / f"error_{key}_api.json").unlink(missing_ok=True)
+            summaries.append({"key": key, "status": status, "records": len(accepted), "usage": usage})
+            print(f"[{index}/{len(entries)}] {company}: Python本地分类完成，{len(accepted)} 条，Token=0")
+            continue
+        if source_count == 0 and not fallback_search:
             status = "no_source_reports"
             if not preserve_existing_success(company_path, target_date):
                 save_json(company_path, {
@@ -624,7 +822,7 @@ def main() -> None:
             continue
 
         prompt = Path(entry["prompt_file"]).read_text(encoding="utf-8")
-        search_enabled = key == "dzqh" and bool(api.get("dzqh_web_search", True))
+        search_enabled = key == "dzqh" and fallback_search and bool(api.get("dzqh_web_search", True))
         extra_body: dict = {"thinking": {"type": "disabled"}}
         if search_enabled:
             extra_body["web_search_options"] = {
@@ -633,15 +831,18 @@ def main() -> None:
             }
         print(f"[{index}/{len(entries)}] {company}: 调用中…")
         try:
-            if key == "dzqh":
+            if key == "dzqh" and fallback_search:
                 if search_client is None:
                     raise RuntimeError(
                         "东证联网检索需要广州 TokenHub API Key；先在广州站开通联网搜索，"
                         "再执行 .\\save_api_key.ps1 -Search"
                     )
-                discovery, discovery_usage, discovery_search = _call_text_model(
-                    search_client, api, _dzqh_discovery_prompt(target_date), extra_body
+                official_results, official_error = fetch_dzqh_official_reports(target_date)
+                official_search = {"search_results": official_results, "search_info": None}
+                discovery, discovery_usage, tokenhub_search, discovery_model, discovery_fallbacks = routed_text_call(
+                    _dzqh_discovery_prompt(target_date), extra_body
                 )
+                discovery_search = _merge_search_meta(official_search, tokenhub_search)
                 classify_prompt = (
                     prompt + "\n\n以下是刚完成的联网资料发现结果。只能使用其中可核实的真实来源，"
                     "按上面的 JSON 规则分类：\n" + discovery
@@ -650,31 +851,37 @@ def main() -> None:
                     "明确未来方向，就应逐项输出，不得因为无法打开微信公众号而返回空数组：\n"
                     + _search_results_evidence(discovery_search)
                 )
-                result, raw, usage = _call_model(
-                    client, api, target_date, company, classify_prompt,
+                result, raw, usage, used_model, classification_fallbacks = routed_model_call(
+                    company, classify_prompt,
                     {"thinking": {"type": "disabled"}},
                     max_tokens=8000,
                 )
                 raw = "--- DISCOVERY ---\n" + discovery + "\n\n--- CLASSIFICATION ---\n" + raw
                 calls = [
+                    {"kind": "dzqh_official_source", "usage": {},
+                     "search": official_search, "error": official_error},
                     {"kind": "dzqh_discovery", "usage": discovery_usage,
-                     "search": discovery_search},
-                    {"kind": "primary_classification", "usage": usage},
+                     "search": tokenhub_search, "model": discovery_model,
+                     "fallback_attempts": discovery_fallbacks},
+                    {"kind": "primary_classification", "usage": usage,
+                     "model": used_model, "fallback_attempts": classification_fallbacks},
                 ]
             else:
-                result, raw, usage = _call_model(
-                    client, api, target_date, company, prompt, extra_body
+                result, raw, usage, used_model, fallbacks = routed_model_call(
+                    company, prompt, extra_body
                 )
-                calls = [{"kind": "primary", "usage": usage}]
+                calls = [{"kind": "primary", "usage": usage, "model": used_model,
+                          "fallback_attempts": fallbacks}]
 
             if key == "citicsf" and not result.get("records"):
                 print(f"[{index}/{len(entries)}] {company}: 首轮异常为空，自动重试一次…")
-                retry_result, retry_raw, retry_usage = _call_model(
-                    client, api, target_date, company,
+                retry_result, retry_raw, retry_usage, retry_model, retry_fallbacks = routed_model_call(
+                    company,
                     prompt + "\n\n上一次响应异常地返回了空数组。请重新逐篇、逐小标题检查全部来源后输出。",
                     extra_body,
                 )
-                calls.append({"kind": "citicsf_primary_retry", "usage": retry_usage})
+                calls.append({"kind": "citicsf_primary_retry", "usage": retry_usage,
+                              "model": retry_model, "fallback_attempts": retry_fallbacks})
                 raw = raw + "\n\n--- PRIMARY RETRY ---\n" + retry_raw
                 result = retry_result
 
@@ -682,27 +889,30 @@ def main() -> None:
                 result.get("records", []), documents, company
             )
 
-            if key == "dzqh" and _needs_dzqh_retry(accepted, discovery_search):
+            if key == "dzqh" and fallback_search and _needs_dzqh_retry(accepted, discovery_search):
                 retry_reason = "校验后为 0" if not accepted else "搜索证据为空"
                 print(f"[{index}/{len(entries)}] {company}: 首轮{retry_reason}，按公众号优先规则补充检索…")
-                retry_discovery, retry_discovery_usage, retry_search = _call_text_model(
-                    search_client, api, _dzqh_discovery_prompt(target_date, focused=True), extra_body
+                retry_discovery, retry_discovery_usage, retry_tokenhub_search, retry_discovery_model, retry_discovery_fallbacks = routed_text_call(
+                    _dzqh_discovery_prompt(target_date, focused=True), extra_body
                 )
+                retry_search = _merge_search_meta(official_search, retry_tokenhub_search)
                 retry_prompt = (
                     _dzqh_retry_prompt(target_date, prompt)
                     + "\n\n第二轮联网资料发现结果：\n" + retry_discovery
                     + "\n\n第二轮 SEARCH_RESULTS 原始证据：\n"
                     + _search_results_evidence(retry_search)
                 )
-                retry_result, retry_raw, retry_usage = _call_model(
-                    client, api, target_date, company, retry_prompt,
+                retry_result, retry_raw, retry_usage, retry_model, retry_fallbacks = routed_model_call(
+                    company, retry_prompt,
                     {"thinking": {"type": "disabled"}},
                     max_tokens=8000,
                 )
                 calls.extend([
                     {"kind": "dzqh_focused_discovery", "usage": retry_discovery_usage,
-                     "search": retry_search},
-                    {"kind": "dzqh_focused_classification", "usage": retry_usage},
+                     "search": retry_tokenhub_search, "model": retry_discovery_model,
+                     "fallback_attempts": retry_discovery_fallbacks},
+                    {"kind": "dzqh_focused_classification", "usage": retry_usage,
+                     "model": retry_model, "fallback_attempts": retry_fallbacks},
                 ])
                 raw = (
                     raw + "\n\n--- FOCUSED DISCOVERY ---\n" + retry_discovery
@@ -746,8 +956,8 @@ def main() -> None:
                 if missing:
                     print(f"[{index}/{len(entries)}] {company}: 首轮仍漏 {len(missing)} 个正文小标题，补充复核…")
                     extra_no_search = {"thinking": {"type": "disabled"}}
-                    supplement, supplement_raw, supplement_usage = _call_model(
-                        client, api, target_date, company,
+                    supplement, supplement_raw, supplement_usage, supplement_model, supplement_fallbacks = routed_model_call(
+                        company,
                         _citic_supplement_prompt(target_date, missing), extra_no_search,
                         max_tokens=6000,
                     )
@@ -760,6 +970,8 @@ def main() -> None:
                         "kind": "citicsf_coverage_supplement",
                         "candidates": len(missing),
                         "usage": supplement_usage,
+                        "model": supplement_model,
+                        "fallback_attempts": supplement_fallbacks,
                     })
                     raw = raw + "\n\n--- COVERAGE SUPPLEMENT ---\n" + supplement_raw
 
@@ -778,7 +990,7 @@ def main() -> None:
                 })
 
             dzqh_search_result_count = 0
-            if key == "dzqh":
+            if key == "dzqh" and fallback_search:
                 dzqh_search_result_count = sum(
                     len((call.get("search") or {}).get("search_results") or [])
                     for call in calls
@@ -793,7 +1005,7 @@ def main() -> None:
 
             result["records"] = accepted
             errors: list[dict] = []
-            if key == "dzqh":
+            if key == "dzqh" and fallback_search:
                 status, error = _dzqh_processing_status(
                     dzqh_search_result_count, accepted
                 )
@@ -808,7 +1020,11 @@ def main() -> None:
                 "crawl": entry.get("crawl", {}),
                 "api": {
                     "provider": api.get("provider", "tokenhub"),
-                    "model": api.get("model", "hy3"),
+                    "model": next(
+                        (call.get("model") for call in reversed(calls) if call.get("model")),
+                        api.get("model", "hy3"),
+                    ),
+                    "configured_models": configured_models(api),
                     "web_search": search_enabled,
                     "usage": aggregate_usage,
                     "calls": calls,

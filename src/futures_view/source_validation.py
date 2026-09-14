@@ -30,6 +30,10 @@ def view_evidence_rejection(record: dict) -> str | None:
     if record.get("view") == "中性":
         if re.search(r"震荡|区间|宽幅波动|窄幅交投|盘整|整理|观望|横盘|多空均衡|供需均衡|暂无趋势", evidence):
             return None
+        # Research reports often express a neutral range numerically without
+        # using the literal word “区间”, e.g. “或在13.8-15万元/吨运行”.
+        if re.search(r"(?:或|预计|料)?在?\s*\d+(?:\.\d+)?\s*[-—–~～至]\s*\d+(?:\.\d+)?[^。；，]{0,20}(?:运行|波动|整理)", evidence):
+            return None
         return "中性观点缺少区间、震荡、观望或均衡等明确证据"
 
     return None

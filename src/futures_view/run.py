@@ -49,7 +49,7 @@ def main() -> None:
         except RuntimeError as exc:
             raise SystemExit(str(exc)) from exc
 
-    if args.stage in {"all", "crawl"} and args.company != "dzqh":
+    if args.stage in {"all", "crawl"}:
         announce("crawl", f"采集官网数据 | {date}")
         call("futures_view.pipeline", "--date", date, "--company", args.company,
              "--headed" if args.headed else "", "--debug" if args.debug else "")
@@ -59,10 +59,10 @@ def main() -> None:
         call("futures_view.build_prompts", "--date", date, "--company", args.company)
     if args.stage in {"all", "llm"}:
         if args.llm_backend == "api":
-            announce("llm", "TokenHub API 分类与东证联网检索")
+            announce("llm", "模型分类；国泰由Python本地处理，东证官网失败时才联网检索")
             call("futures_view.llm.api_llm", "--date", date, "--company", args.company)
         else:
-            announce("llm", "元宝分类与东证检索")
+            announce("llm", "元宝分类；国泰由Python本地处理")
             call("futures_view.llm.browser_llm", "--date", date, "--company", args.company)
     if args.stage in {"all", "finalize"}:
         announce("finalize", "校验、评分并生成 Excel")
