@@ -64,16 +64,16 @@ def extract_pdf_text(data: bytes) -> tuple[str, int]:
 
 
 def extract_pdf_outlook_digest(text: str) -> str:
-    """Keep only each commodity section's conclusion from an East morning report."""
+    """Keep only each commodity section's conclusion/advice from a morning report."""
     headings = list(re.finditer(r"(?m)^2\.\d+、[^\n.。]{2,100}$", text))
     parts: list[str] = []
     for index, heading in enumerate(headings):
         end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
         section = text[heading.end():end]
-        marker = section.find("总结与展望：")
-        if marker < 0:
+        marker = re.search(r"(?:总结与展望|投资建议)\s*[:：]", section)
+        if not marker:
             continue
-        summary = section[marker + len("总结与展望："):]
+        summary = section[marker.end():]
         summary = re.split(r"\n(?:上海东证期货有限公司|【分析师声明】)", summary, maxsplit=1)[0]
         summary = re.sub(
             r"综合晨报-日度报告\s*20\d{2}-\d{2}-\d{2}\s*\d+\s*期货研究报告",
@@ -81,10 +81,10 @@ def extract_pdf_outlook_digest(text: str) -> str:
         )
         summary = re.sub(r"\s+", " ", summary).strip()
         if summary:
-            parts.append(f"{heading.group(0).strip()}\n总结与展望：{summary}")
+            parts.append(f"{heading.group(0).strip()}\n展望摘要：{summary}")
     digest = "\n\n".join(parts)
     if len(parts) < 3 or len(digest) < 50:
-        raise ValueError(f"PDF 总结与展望提取不足：{len(parts)} 节，{len(digest)} 字")
+        raise ValueError(f"PDF 展望摘要提取不足：{len(parts)} 节，{len(digest)} 字")
     return digest
 
 
@@ -131,14 +131,17 @@ class DZQHScraper(BaseScraper):
                 full_text, page_count = extract_pdf_text(data)
                 if self.target_date not in full_text or "东证期货" not in full_text:
                     raise ValueError("PDF 正文缺少目标日期或东证期货署名")
+                # Keep the verified official PDF even if the downstream digest parser
+                # encounters a new report layout. This makes format regressions
+                # inspectable without downloading the source again by hand.
+                pdf_path = pdf_dir / f"dzqh_{post['post_id']}_{self.target_date.replace('-', '')}.pdf"
+                pdf_path.write_bytes(data)
                 digest = extract_pdf_outlook_digest(full_text)
                 content_parts = []
                 if post.get("excerpt"):
                     content_parts.append("官网摘要：\n" + post["excerpt"])
-                content_parts.append("官方PDF各商品总结与展望：\n" + digest)
+                content_parts.append("官方PDF各商品展望摘要：\n" + digest)
                 text = "\n\n".join(content_parts)
-                pdf_path = pdf_dir / f"dzqh_{post['post_id']}_{self.target_date.replace('-', '')}.pdf"
-                pdf_path.write_bytes(data)
                 items.append(RawResearchItem(
                     company=self.company,
                     source_date=post["source_date"],
@@ -153,7 +156,7 @@ class DZQHScraper(BaseScraper):
                     crawl_status="ok",
                     source_id=post["post_id"],
                     notes=(f"东证官网 WordPress API 定位报告；PDF 共 {page_count} 页，"
-                           f"本地仅保留官网摘要和各商品总结与展望，共 {len(text)} 字。"),
+                           f"本地仅保留官网摘要和各商品展望摘要，共 {len(text)} 字。"),
                 ))
             except Exception as exc:
                 errors.append(f"{post['source_title']}：{type(exc).__name__}: {exc}")

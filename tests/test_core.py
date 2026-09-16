@@ -42,7 +42,12 @@ from futures_view.source_validation import (
     repair_source_urls,
     view_evidence_rejection,
 )
-from futures_view.commodities import canonical_commodity, normalize_contract, sector_for_commodity
+from futures_view.commodities import (
+    UNSCORED_COMMODITIES,
+    canonical_commodity,
+    normalize_contract,
+    sector_for_commodity,
+)
 from futures_view.llm.browser_llm import (
     attachment_failure_response,
     content_limit_failure,
@@ -208,6 +213,26 @@ class CoreTests(unittest.TestCase):
         self.assertIn("短期矿价震荡偏弱", digest)
         self.assertIn("短期油价震荡偏强", digest)
         self.assertIn("玉米区间运行", digest)
+        self.assertNotIn("长篇点评", digest)
+        self.assertNotIn("................", digest)
+
+    def test_dzqh_pdf_digest_accepts_investment_advice_layout(self):
+        text = """目录
+2.1、黑色金属（焦煤/焦炭）................ 6
+2.2、能源化工（原油）................ 7
+2.1、黑色金属（焦煤/焦炭）
+新闻和长篇点评不应保留。
+投资建议：短期供需偏紧，焦煤高位震荡。
+2.2、能源化工（原油）
+更多长篇资讯不应保留。
+投资建议：油价高位震荡。
+2.3、农产品（豆粕）
+供需信息不应保留。
+投资建议：豆粕震荡偏弱。"""
+        digest = extract_pdf_outlook_digest(text)
+        self.assertIn("短期供需偏紧，焦煤高位震荡", digest)
+        self.assertIn("油价高位震荡", digest)
+        self.assertIn("豆粕震荡偏弱", digest)
         self.assertNotIn("长篇点评", digest)
         self.assertNotIn("................", digest)
 
@@ -582,6 +607,9 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(canonical_commodity("有色金属板块"), "综合")
         self.assertEqual(canonical_commodity("集运指数（欧线）"), "集运欧线")
         self.assertEqual(canonical_commodity("集装箱运价"), "集运欧线")
+        self.assertEqual(canonical_commodity("干散货航运运费"), "干散货运价")
+        self.assertEqual(canonical_commodity("BDI"), "干散货运价")
+        self.assertIn("干散货运价", UNSCORED_COMMODITIES)
         self.assertEqual(canonical_commodity("郑糖"), "白糖")
         self.assertEqual(canonical_commodity("沪铜"), "铜")
         self.assertEqual(canonical_commodity("豆二"), "豆二")

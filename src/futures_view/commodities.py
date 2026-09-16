@@ -42,7 +42,9 @@ COMMODITY_SECTORS = {
 }
 
 # 这些品种在广发日评中存在，但不属于当前固定的七个评分板块。
-UNSCORED_COMMODITIES = {"股指", "工业硅", "集运欧线", "丙烯"}
+# Known market topics outside the current seven commodity scoring sectors. They
+# are rejected from scored output without being reported as unknown mappings.
+UNSCORED_COMMODITIES = {"股指", "工业硅", "集运欧线", "干散货运价", "丙烯"}
 
 ALIASES = {
     "铁矿": "铁矿石", "铁矿砂": "铁矿石", "螺纹": "螺纹钢", "硅锰": "锰硅", "铸造铝合金": "铝合金",
@@ -59,6 +61,8 @@ ALIASES = {
     "能源化工板块": "综合", "能化板块": "综合",
     "集运指数(欧线)": "集运欧线", "集运指数（欧线）": "集运欧线",
     "集装箱运价": "集运欧线", "欧线集装箱运价": "集运欧线",
+    "干散货航运运费": "干散货运价", "干散货航运": "干散货运价",
+    "波罗的海干散货指数": "干散货运价", "BDI": "干散货运价",
     "沪铜": "铜", "沪铝": "铝", "沪锌": "锌", "沪铅": "铅",
     "沪镍": "镍", "沪锡": "锡", "沪金": "黄金", "沪银": "白银",
     "燃油": "燃料油", "石油沥青": "沥青", "国际铜": "铜",
